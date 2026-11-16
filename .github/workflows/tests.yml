@@ -1,0 +1,32 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install with pip
+        run: python -m pip install .
+      - name: The installed commands work outside the source folder
+        working-directory: ${{ runner.temp }}
+        run: |
+          hostguard --version
+          hostguard components
+          python -m hostguard config show
+      - name: Tests
+        run: python -m unittest discover -s tests

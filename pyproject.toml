@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hostguard"
+dynamic = ["version"]
+description = "An agentic detection-and-response layer for one Windows PC. Microsoft Defender stays the antivirus engine."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Cobez02" }]
+keywords = ["windows", "security", "edr", "incident-response", "microsoft-defender", "blue-team", "llm-agent", "ollama"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators",
+    "Operating System :: Microsoft :: Windows :: Windows 10",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Security",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Cobez02/hostguard"
+Issues = "https://github.com/Cobez02/hostguard/issues"
+
+[project.scripts]
+hostguard = "hostguard.cli:main"
+
+[project.gui-scripts]
+hostguardw = "hostguard.cli:app_main"
+
+[tool.setuptools]
+packages = ["hostguard", "hostguard.collect", "hostguard.detect"]
+
+[tool.setuptools.package-data]
+hostguard = ["ps/*.ps1", "assets/*.ico"]
+
+[tool.setuptools.dynamic]
+version = { attr = "hostguard.__version__" }
