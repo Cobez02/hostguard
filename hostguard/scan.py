@@ -13,6 +13,7 @@ stops because one source was unreadable, and it says plainly what it could not s
 from __future__ import annotations
 
 import os
+import re
 import time
 import traceback
 
@@ -107,12 +108,46 @@ def _second_opinions(findings: list[Finding], sig_map: dict, procs: list[dict], 
     return out
 
 
-def _baseline_findings(store: Store) -> list[Finding]:
+# A command line that can only delete one named file or folder: what an updater leaves behind to
+# tidy up after itself at the next sign-in. Nothing can be chained onto it.
+_ONLY_DELETES = re.compile(r'^"?[a-z]:.windows.system32.cmd\.exe"?\s+/q\s+/c\s+(?:del|rmdir)(?:\s+/[sq])+\s+"[^"&|<>^%]+"$', re.I)
+
+
+def _new_autorun_severity(data: dict, sig_map: dict) -> tuple[str, str]:
+    """How much an autorun that appeared after the baseline matters, and why. What it starts decides:
+    an update of signed software re-registers dozens of entries and must not look like an intrusion."""
+    from .contain import LOLBINS
+    image, command = data.get("image") or "", (data.get("command") or "").strip()
+    if util.basename(image).lower() in LOLBINS:       # judged by its command line, not by Microsoft's signature on the shell
+        if _ONLY_DELETES.match(command):
+            return "low", "it can only delete one file or folder"
+        return "medium", "it starts a program that runs whatever its command line says"
+    sig = sigs.lookup(sig_map, image)
+    if sigs.is_valid(sig):
+        return "low", f"the program it starts is {sigs.describe(sig)}"
+    if not sig or sig.get("status") in ("Unreadable", "Missing"):
+        return "medium", "the program it starts could not be checked"
+    return "medium", f"the program it starts is {sigs.describe(sig)}"
+
+
+def _baseline_findings(store: Store, sig_map: dict | None = None) -> list[Finding]:
     if store.baseline_time() is None:
         return []
     out = []
-    for item in store.inventory(only_new=True):
+    new_items = store.inventory(only_new=True)
+    sig_map = dict(sig_map or {})
+    unchecked = [i["data"].get("image") for i in new_items if i["kind"] == "autorun" and i["data"].get("image")
+                 and sigs.lookup(sig_map, i["data"]["image"]) is None]
+    if unchecked:
+        try:
+            sig_map.update(sigs.check(store, unchecked))
+        except util.CollectError:
+            pass                                      # unchecked stays unknown, and unknown is graded as medium
+    for item in new_items:
         kind, data = item["kind"], item["data"]
+        severity, why = _NEW_SEVERITY.get(kind, "low"), ""
+        if kind == "autorun":
+            severity, why = _new_autorun_severity(data, sig_map)
         label = _NEW_LABEL.get(kind, kind)
         name = data.get("name") or data.get("subject") or data.get("process") or item["key"]
         desc = ("This was not present when you accepted the baseline. New software adds entries like this; so does "
@@ -124,10 +159,11 @@ def _baseline_findings(store: Store) -> list[Finding]:
                    "command": data.get("command"), "path": data.get("image")}
             actions = ["disable_autorun"]
         out.append(Finding(rule=f"baseline.new.{kind}", title=f"New {label} since the baseline: {util.truncate(name, 90)}",
-                           severity=_NEW_SEVERITY.get(kind, "low"), confidence="low", category="persistence" if kind == "autorun" else
+                           severity=severity, confidence="low", category="persistence" if kind == "autorun" else
                            "network" if kind == "listener" else "account" if kind in ("account", "admin") else
                            "browser" if kind == "browser_extension" else "config", collector="baseline", description=desc,
-                           evidence={**data, "first_seen": util.iso(item["first_seen"])}, entity=ent, actions=actions,
+                           evidence={**data, "first_seen": util.iso(item["first_seen"]), **({"assessment": why} if why else {})},
+                           entity=ent, actions=actions,
                            mitre=["T1547"] if kind == "autorun" else [], key_parts=(kind, item["key"])))
     return out
 
@@ -250,7 +286,7 @@ def run(profile: str = "quick", store: Store | None = None, cfg: dict | None = N
             if items:
                 store.inventory_sync(kind, items)
         store.inventory_sync("browser_extension", d_browsers.inventory(browsers))
-        return _baseline_findings(store)
+        return _baseline_findings(store, sig_map)
 
     if "persistence" in ran and "system" in ran:
         judge("baseline", _inventory)

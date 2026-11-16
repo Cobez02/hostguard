@@ -58,7 +58,7 @@ HostGuard does not catch more malware than Defender. It answers the questions De
 |---|---|
 | **Compromise check** | Running processes (impostors, abused Windows tools, odd parents, unsigned code), network connections and listeners, every autorun location (registry, tasks, services, drivers, WMI subscriptions, COM overrides, startup folders, BITS jobs and about twenty more), Defender's state and history, accounts, trusted root certificates, hosts and proxy settings, browser extensions and policies, the event logs, files in the folders downloads land in, and the memory of your own processes for injected code. |
 | **One verdict** | *No signs of compromise*, *items to review*, *suspicious*, or *signs of compromise*. Hardening gaps are listed separately and never raise it. Every scan also says what it could **not** see. |
-| **Change tracking** | Accept a baseline once. Later scans flag each new autorun, account, administrator, listening port, root certificate and browser extension. |
+| **Change tracking** | Accept a baseline once. Later scans flag each new autorun, account, administrator, listening port, root certificate and browser extension. A new autorun is graded by what it starts, so a signed program updating itself is listed without changing the verdict. |
 | **Containment** | Suspend or stop a process, quarantine a file, switch off an autorun, block an address, cut the PC off the network. Reversible actions have an Undo. Guardrails are code: core Windows processes and files can never be targets. |
 | **Automatic containment** | Off, ask first (default), or automatic. Automatic only touches unsigned programs and script hosts, only with reversible actions, never raises a UAC prompt, and stops at an hourly limit. |
 | **Real-time monitor** | Watches new processes, connections, autoruns, downloads and log events, runs the same rules, applies the policy and raises a Windows notification. |
@@ -214,7 +214,7 @@ quarantined files into AppData through Windows' transfer service so they land in
 python -m unittest discover -s tests
 ```
 
-198 tests. They cover the rules (what must fire and what must not), they exercise containment
+203 tests. They cover the rules (what must fire and what must not), they exercise containment
 for real on throwaway processes, files and registry values that the tests create themselves, and
 they send the dashboard the requests a hostile web page could forge and check each is refused.
 Every push installs the package with pip on GitHub's Windows machines and runs the suite there
