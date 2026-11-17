@@ -76,17 +76,33 @@ def run_ps(what: str, args: dict | None = None, timeout: float = 180):
             raise CollectError(f"{what}: PowerShell exited {rc}: {err.strip()[:300]}")
         return None
     try:
-        return json.loads(text)
+        return plain(json.loads(text))
     except ValueError:
         # A stray warning line before the JSON: take the last line that parses.
         for line in reversed(text.splitlines()):
             line = line.strip()
             if line[:1] in "[{":
                 try:
-                    return json.loads(line)
+                    return plain(json.loads(line))
                 except ValueError:
                     continue
         raise CollectError(f"{what}: unreadable PowerShell output: {text[:200]!r}") from None
+
+
+def plain(value):
+    """Undo a Windows PowerShell 5.1 habit in parsed JSON, at any depth.
+
+    An array that passed through a calculated property is written as {"value": [...], "Count": n}
+    instead of as the array. Left alone, a list of attack surface reduction rules reads as one
+    unrecognisable object, and a switch that Windows did turn on shows as off."""
+    if isinstance(value, dict):
+        if set(value) == {"value", "Count"} and isinstance(value["Count"], int):
+            inner = value["value"]
+            return [plain(v) for v in inner] if isinstance(inner, list) else ([] if inner is None else [plain(inner)])
+        return {k: plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [plain(v) for v in value]
+    return value
 
 
 def as_list(value) -> list:
