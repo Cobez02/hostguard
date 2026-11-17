@@ -1,7 +1,8 @@
 """Optional open-source add-ons. HostGuard works without any of them; each one widens what a scan sees.
 
-Nothing here downloads anything. You fetch a tool from its official release page and unpack it
-into the tools folder; from then on scans use it automatically. The command lines below follow
+Nothing here downloads anything. A tool gets into the tools folder either by your own hand or
+through addons.py, which fetches a pinned release when you ask for it; from then on scans use it
+automatically. The command lines below follow
 each project's documentation as of November 2026 (YARA 4.6, Hollows Hunter 0.4.1, Hayabusa 4.4).
 
     YARA + YARA Forge rules   signature matching over the folders malware lands in
@@ -22,11 +23,12 @@ from .model import Finding
 
 CATALOG = [
     {"id": "yara", "title": "YARA with YARA Forge rules", "folder": "yara", "patterns": ["yara64.exe", "yara.exe"],
-     "adds": "Signature matching over Downloads, Desktop, Temp and Public with a curated community rule pack.",
+     "adds": "Signature matching with a curated community rule pack: over the files every scan singles out, and over whole "
+             "download folders in a deep scan.",
      "get": "https://github.com/VirusTotal/yara/releases (the win64 zip) and https://github.com/YARAHQ/yara-forge/releases (the 'core' rule pack)",
      "place": "Put yara64.exe in {dir} and the .yar rule file in {dir}\\rules", "licence": "BSD-3-Clause; rule licences vary"},
     {"id": "hollows_hunter", "title": "Hollows Hunter", "folder": "hollows_hunter", "patterns": ["hollows_hunter64.exe", "hollows_hunter.exe"],
-     "adds": "Scans every process it can open for implanted programs, shellcode and replaced modules.",
+     "adds": "In a deep scan, examines every process it can open for implanted programs, shellcode and replaced modules.",
      "get": "https://github.com/hasherezade/hollows_hunter/releases", "place": "Put hollows_hunter64.exe in {dir}",
      "licence": "BSD-2-Clause"},
     {"id": "hayabusa", "title": "Hayabusa (Sigma rules for event logs)", "folder": "hayabusa",
@@ -115,6 +117,45 @@ def yara_scan(targets: list[str], max_mb: int = 64, timeout_each: int = 180, log
         matches += parse_yara(out)
     if log:
         log(f"YARA: {len(matches)} rule match(es) in {len(targets)} folder(s)")
+    return matches
+
+
+def yara_scan_files(file_paths: list[str], max_mb: int = 64, timeout: int = 120, log=None) -> list[dict]:
+    """Match the rule pack against a given list of files in one run: the files a scan has already singled out.
+
+    Walking whole folders does not scale (a Temp folder can hold a million files), and compiling the
+    rule pack costs seconds per run. One run over a short list costs that once."""
+    exe, rules = find("yara"), yara_rules()
+    if not exe or not rules:
+        return []
+    # YARA for Windows reads its list file as UTF-16 without a byte-order mark (checked against 4.6.0:
+    # a mark corrupts the first name, and any other encoding reads as one unusable line).
+    encoding = "utf-16-le" if os.name == "nt" else "utf-8"
+    todo = []
+    for p in sorted({p for p in file_paths if p}):
+        try:
+            p.encode(encoding)
+            if os.path.isfile(p) and os.path.getsize(p) <= max_mb << 20:
+                todo.append(p)
+        except (UnicodeEncodeError, OSError):
+            continue
+    if not todo:
+        return []
+    fd, listing = tempfile.mkstemp(prefix="hg-yara-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline="\n") as f:
+            f.write("\n".join(todo) + "\n")
+        rc, out, err = util.run_cmd([exe, "-w", "-N", "-a", str(timeout), "--scan-list", *rules, listing], timeout=timeout + 60)
+    finally:
+        try:
+            os.unlink(listing)
+        except OSError:
+            pass
+    if rc not in (0, 1) and log:
+        log(f"YARA on {len(todo)} file(s): exit {rc} {util.truncate(err, 160)}")
+    matches = parse_yara(out)
+    if log:
+        log(f"YARA: {len(matches)} rule match(es) in {len(todo)} file(s)")
     return matches
 
 

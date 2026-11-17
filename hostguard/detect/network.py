@@ -146,6 +146,8 @@ def inventory(facts: dict) -> dict[str, dict]:
         if c["state"] != "LISTEN" or util.is_loopback(c["laddr"]) or c["lport"] >= 49152:
             continue
         p = procs.get(c.get("pid") or 0) or {}
-        image = (p.get("path") or p.get("name") or "?").lower()
+        # Keyed by the program's file name, never its full path: the path of a system service can only
+        # be read with administrator data, and the same listener must not look new when a scan gains it.
+        image = util.basename(p.get("path") or p.get("name") or "?").lower()
         out[f"{c['proto']}|{c['lport']}|{image}"] = {"port": c["lport"], "proto": c["proto"], "process": p.get("name"), "path": p.get("path")}
     return out

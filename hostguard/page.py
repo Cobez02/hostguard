@@ -305,7 +305,9 @@ _BODY = r"""
       </div>
       <div class="card">
         <h2>Optional open-source add-ons</h2>
-        <p class="small">HostGuard downloads nothing. Put a tool in its folder and the next scan uses it.</p>
+        <p class="small">HostGuard downloads nothing by itself. Download fetches the release pinned in HostGuard's source from
+          the project's GitHub page, checks its SHA-256 and unpacks it into the tools folder. You can also put a tool
+          there by hand.</p>
         <div id="addons"></div>
       </div>
     </div>
@@ -763,7 +765,27 @@ _JS = r"""
     paint($("addons"), rows, () => rows.map((a) => el("div", { class: "item" },
       el("div", {}, el("b", { text: a.title }), el("span", { class: "tag" + (a.installed ? " ok" : ""), text: a.installed ? "installed" : "not installed" })),
       el("div", { class: "small", text: a.adds }),
-      el("div", { class: "small", text: a.installed ? a.detail : [a.get, a.place].filter(Boolean).join(". ") }))));
+      el("div", { class: "small", text: a.installed ? a.detail + (a.managed_version ? " | version " + a.managed_version : "")
+        : [a.get, a.place].filter(Boolean).join(". ") }),
+      a.download ? el("div", { class: "row" },
+        el("button", { class: "b" + (a.installed ? "" : " primary"), text: (a.installed ? "Download again" : "Download") + ` (${size(a.download.bytes)})`,
+          onclick: () => installAddon(a) }),
+        a.installed || a.managed_version ? el("button", { class: "b danger", text: "Remove", onclick: () => removeAddon(a) }) : null) : null)));
+  }
+
+  async function installAddon(a) {
+    const dl = a.download;
+    const sure = await ask({ title: "Download " + a.title + "?", ok: "Download",
+      text: "HostGuard will download:\n" + dl.files.map((f) => `- ${f.name} (${f.size_text}) from ${f.source}`).join("\n")
+        + `\n\nEach file must match the size and SHA-256 written in HostGuard's source on ${dl.pinned_on}, or it is thrown away. `
+        + `It is unpacked into ${a.folder}. Nothing is run now: later scans use it.\n\nLicence: ${a.licence}.` });
+    if (sure) act("addon", { id: a.id, what: "install" });
+  }
+
+  async function removeAddon(a) {
+    const sure = await ask({ title: "Remove " + a.title + "?", ok: "Remove", danger: true,
+      text: `This deletes ${a.folder} and everything in it, including any files you put there yourself.` });
+    if (sure) act("addon", { id: a.id, what: "remove" });
   }
 
   function renderSettings(d) {

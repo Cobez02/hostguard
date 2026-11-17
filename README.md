@@ -19,7 +19,8 @@ ran, containment, and someone to investigate. HostGuard is that layer.
 
 ## Install
 
-Windows 10 or 11 and Python 3.11 or newer. HostGuard has no dependencies and downloads nothing.
+Windows 10 or 11 and Python 3.11 or newer. HostGuard has no dependencies. It downloads nothing
+unless you press Download for an optional add-on.
 
 ```
 pip install git+https://github.com/Cobez02/hostguard
@@ -141,7 +142,7 @@ isolate on|off|status
 monitor start|stop|status|run
 triage [ID] | ask "question"     the agent
 harden status|apply NAME|revert NAME
-components | selftest [--defender] | report | config | reset
+components [install|remove NAME] | selftest [--defender] | report | config | reset
 ```
 
 Scan exit codes: 0 clean or review, 1 suspicious, 2 signs of compromise.
@@ -165,18 +166,27 @@ Scan exit codes: 0 clean or review, 1 suspicious, 2 signs of compromise.
 
 ## Optional open-source add-ons
 
-HostGuard downloads nothing. Put a tool in `~/.hostguard/tools/<name>/` and scans use it.
-`hostguard components` and the dashboard's Hardening tab show where each goes.
+HostGuard works without them and fetches nothing by itself. Each add-on has a Download button on
+the dashboard's Hardening tab, and `hostguard components install yara` does the same from a
+terminal. You can also put a tool in `~/.hostguard/tools/<name>/` by hand.
 
-| Add-on | Adds |
-|---|---|
-| [YARA](https://github.com/VirusTotal/yara/releases) with the [YARA Forge](https://github.com/YARAHQ/yara-forge/releases) core pack | Signature matching over Downloads, Desktop, Temp and Public |
-| [Hollows Hunter](https://github.com/hasherezade/hollows_hunter/releases) | A deep scan of every process for implanted or replaced code |
-| [Hayabusa](https://github.com/Yamato-Security/hayabusa/releases) | Thousands of Sigma rules over the event logs, during the administrator scan |
-| Sysmon (built into recent Windows 11) | Full process, network and injection telemetry, from the Hardening switch |
+| Add-on | Adds | Pinned release |
+|---|---|---|
+| [YARA](https://github.com/VirusTotal/yara/releases) with the [YARA Forge](https://github.com/YARAHQ/yara-forge/releases) core pack | Signature matching over the files each scan singles out. A deep scan also sweeps the download folders | 4.6.0, rules of 2026-11-15 |
+| [Hollows Hunter](https://github.com/hasherezade/hollows_hunter/releases) | In a deep scan, a check of every process for implanted or replaced code | 0.4.1.1 |
+| [Hayabusa](https://github.com/Yamato-Security/hayabusa/releases) | Thousands of Sigma rules over the event logs, during the administrator scan | 4.4.0 |
+| Sysmon (built into recent Windows 11) | Full process, network and injection telemetry | A Windows feature: use the Hardening switch |
 
-The command lines follow each project's documentation as of November 2026. They were tested here
-against stand-in executables, **not** against the real tools.
+A download is narrow on purpose. It can fetch only the files pinned in `hostguard/addons.py`: a
+fixed github.com release address with the size and SHA-256 that the project's release page
+published. A file that does not match is thrown away before anything is unpacked, redirects are
+followed only to GitHub's own download hosts, and an archive cannot write outside its add-on's
+folder. Nothing downloaded is run at that point: later scans use it.
+
+The command lines follow each project's documentation as of November 2026. The automated tests use
+stand-in executables and a stand-in release server. On one Windows 11 PC the three downloads were
+also done for real, and YARA 4.6.0 and Hollows Hunter 0.4.1.1 were run for real. Hayabusa has not
+been run yet.
 See [docs/open-source-review.md](docs/open-source-review.md) for the full survey and why this was
 built rather than adopted.
 
@@ -197,10 +207,11 @@ Read these before relying on it.
   legitimately (reported as low when the program is signed).
 - **Isolation covers this PC's own programs.** Containers and virtual machines route separately.
 - **A local model can be wrong.** Its verdict is shown with its evidence so you can check it.
-- **Not live-tested:** everything that needs a UAC prompt (isolation, address blocking, the
-  hardening switches, the administrator scan, elevated quarantine). Those paths are covered by
-  dry-run tests that prove each request is validated and what it would change, not that Windows
-  accepts the change.
+- **Not live-tested:** network isolation, address blocking, elevated quarantine and running
+  Hayabusa. Those paths are covered by dry-run and stand-in tests that prove each request is
+  validated and what it would change, not that Windows accepts it. The administrator scan, the
+  add-on downloads and eight of the hardening switches have been used for real on one Windows 11
+  PC.
 
 ## Microsoft Store Python
 
@@ -214,9 +225,10 @@ quarantined files into AppData through Windows' transfer service so they land in
 python -m unittest discover -s tests
 ```
 
-203 tests. They cover the rules (what must fire and what must not), they exercise containment
-for real on throwaway processes, files and registry values that the tests create themselves, and
-they send the dashboard the requests a hostile web page could forge and check each is refused.
+234 tests. They cover the rules (what must fire and what must not), they exercise containment
+for real on throwaway processes, files and registry values that the tests create themselves,
+they send the dashboard the requests a hostile web page could forge and check each is refused,
+and they feed the add-on downloader altered files, hostile archives and foreign addresses.
 Every push installs the package with pip on GitHub's Windows machines and runs the suite there
 with Python 3.11 and 3.13.
 
@@ -234,7 +246,7 @@ hostguard/
   monitor.py notify.py  the real-time loop and notifications
   agent.py tools.py     the triage agent and its read-only tools
   elevate.py harden.py  the administrator path and the hardening switches
-  components.py         optional add-ons
+  components.py addons.py  optional add-ons: running them, and downloading pinned releases
   ui.py page.py api.py  the dashboard: server, page, and the requests behind it
   launch.py shortcuts.py  how background processes and shortcuts start HostGuard
   ps/                   PowerShell: collectors, the elevated helper

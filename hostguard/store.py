@@ -79,6 +79,31 @@ class Store:
             self._db.execute("PRAGMA synchronous=NORMAL")
             self._db.executescript(_SCHEMA)
             self._db.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """One-time repairs of data written by earlier versions."""
+        if self.kv_get("listener_keys") == "2":
+            return
+        # A listener's key used to end in its program's full path when that could be read and in the
+        # bare file name when it could not. A scan with administrator data could read more paths, so
+        # every system port looked new. Keys now always end in the file name; merge the old ones.
+        sep = chr(92)
+        with self._lock, self._db:
+            for row in self._db.execute("SELECT key, baseline, first_seen FROM inventory WHERE kind='listener'").fetchall():
+                proto, _, rest = row["key"].partition("|")
+                port, _, image = rest.partition("|")
+                new = f"{proto}|{port}|{image.replace('/', sep).rsplit(sep, 1)[-1]}"
+                if new == row["key"]:
+                    continue
+                twin = self._db.execute("SELECT baseline, first_seen FROM inventory WHERE kind='listener' AND key=?", (new,)).fetchone()
+                if twin:
+                    self._db.execute("UPDATE inventory SET baseline=?, first_seen=? WHERE kind='listener' AND key=?",
+                                     (max(twin["baseline"], row["baseline"]), min(twin["first_seen"], row["first_seen"]), new))
+                    self._db.execute("DELETE FROM inventory WHERE kind='listener' AND key=?", (row["key"],))
+                else:
+                    self._db.execute("UPDATE inventory SET key=? WHERE kind='listener' AND key=?", (new, row["key"]))
+        self.kv_set("listener_keys", "2")
 
     def close(self) -> None:
         with self._lock:

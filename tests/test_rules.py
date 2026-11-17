@@ -576,7 +576,7 @@ class Network(unittest.TestCase):
         self.assertEqual(one(fs, "net.listen.shell").severity, "high")
         self.assertEqual(one(fs, "net.listen.remote_admin").severity, "low")
         self.assertEqual(len(one(fs, "net.listen.inventory").evidence["listeners"]), 2, "loopback-only listeners are not exposed")
-        self.assertEqual(sorted(d_network.inventory(facts)), [r"tcp|22|c:\windows\system32\openssh\sshd.exe", r"tcp|4444|c:\users\a\downloads\nc.exe"])
+        self.assertEqual(sorted(d_network.inventory(facts)), ["tcp|22|sshd.exe", "tcp|4444|nc.exe"])
 
 
 class MemoryAndBrowsers(unittest.TestCase):

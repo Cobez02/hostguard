@@ -61,6 +61,10 @@ $AutorunKeys = @(
     '^Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows$',
     '^Software\\Microsoft\\Command Processor$'
 )
+# SHA-256 of the Hayabusa program inside each release that hostguard/addons.py pins. Hayabusa is not
+# code-signed and it runs elevated, so only these exact files, or a validly signed one, are ever run.
+$HayabusaPinned = @('b73e41ca75f1f79348550242cd02a9d37207240cd72b1256549ee704969bf403')
+
 # Attack Surface Reduction rule ids, from Microsoft's ASR rules reference.
 $AsrStandard = '56a863a9-875e-4185-98a7-b882c64b5ce5', '9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2', 'e6db77e5-3df2-4cf1-b95a-636979351e5b'
 $AsrExtended = 'd4f940ab-401b-4efc-aadc-ad5f3c50688a', '5beb7efe-fd9a-4556-801d-275e5ffc04cc', 'd3e037e1-3eb8-44c8-a917-57927947596d',
@@ -395,16 +399,18 @@ try {
                     Set-Content -LiteralPath $file -Encoding UTF8
                 if ($LASTEXITCODE -eq 0) { $files["events-$i.xml"] = [string]$q.log }
             }
-            # Optional: Hayabusa (Sigma rules over the live event logs). It is only run from HostGuard's own
-            # tools folder and only when its publisher signature verifies, because it runs elevated.
+            # Optional: Hayabusa (Sigma rules over the live event logs). Because it runs elevated, it is only
+            # run from HostGuard's own tools folder, and only when its publisher signature verifies or the file
+            # is exactly the program of a release pinned above.
             $hayabusaFile = $null; $hayabusaSigner = $null
             if ($a.hayabusa) {
                 $hexe = [IO.Path]::GetFullPath([string]$a.hayabusa)
                 $toolsDir = (Join-Path $stateHome 'tools\hayabusa') + '\'
                 if ($hexe.StartsWith($toolsDir, [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $hexe -PathType Leaf)) {
                     $sig = Get-AuthenticodeSignature -LiteralPath $hexe
-                    if ($sig.Status -eq 'Valid') {
-                        $hayabusaSigner = $sig.SignerCertificate.Subject
+                    $isPinned = $sig.Status -ne 'Valid' -and ((Get-FileHash -LiteralPath $hexe -Algorithm SHA256).Hash -in $HayabusaPinned)
+                    if ($sig.Status -eq 'Valid' -or $isPinned) {
+                        $hayabusaSigner = if ($isPinned) { 'ran the pinned release, verified by its SHA-256' } else { "ran, signed by $($sig.SignerCertificate.Subject)" }
                         $level = [string]$a.hayabusa_level
                         if ($level -notin 'informational', 'low', 'medium', 'high', 'critical') { $level = 'medium' }
                         $hout = Join-Path $outdir 'hayabusa.jsonl'
@@ -413,7 +419,7 @@ try {
                         try { & $hexe dfir-timeline -l -t jsonl -o $hout -w -m $level -q -N -K -C -Q 2>$null | Out-Null } finally { Pop-Location }
                         if (Test-Path -LiteralPath $hout) { $hayabusaFile = 'hayabusa.jsonl' }
                     }
-                    else { $hayabusaSigner = "not run: its signature status is $($sig.Status)" }
+                    else { $hayabusaSigner = "not run: it is $($sig.Status) and is not the program of a pinned release" }
                 }
             }
             $latest = @{ when = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); processes = $procs; defender = $defender; secureboot = $secureboot

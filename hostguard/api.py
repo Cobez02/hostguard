@@ -14,7 +14,8 @@ import secrets
 import threading
 import time
 
-from . import __version__, agent, components, contain, defender, elevate, harden, monitor, paths, policy, quarantine, report, scan, util, winapi
+from . import (__version__, addons, agent, components, contain, defender, elevate, harden, monitor, paths, policy, quarantine, report,
+               scan, util, winapi)
 from .model import ALLOWED, CONTAINED, OPEN, POSTURE_CATEGORIES, RESOLVED, SEV_ORDER
 from .store import Store
 
@@ -183,10 +184,21 @@ class Api:
             "trusted_paths": (cfg.get("trusted") or {}).get("paths") or [],
             "notify": bool((cfg.get("monitor") or {}).get("notify", True)),
             "agent": self._agent_state(), "answer": self.last_answer, "defender": d,
-            "addons": self._cached("addons", 30, components.status),
+            "addons": self._cached("addons", 30, self._addons),
             "tasks": self.tasks.snapshot(), "scanning": bool(self.tasks.running("scan")),
             "sandboxed_python": paths.python_is_sandboxed(), "state_folder": str(paths.home()), "elevated": winapi.is_elevated(),
         }
+
+    @staticmethod
+    def _addons() -> list[dict]:
+        """Each add-on's state on disk, plus what its Download button would fetch."""
+        folders = {c["id"]: c["folder"] for c in components.CATALOG}
+        rows = components.status()
+        for row in rows:
+            row["download"] = addons.plan(row["id"])
+            row["managed_version"] = (addons.installed_info(row["id"]) or {}).get("version")
+            row["folder"] = str(paths.home() / "tools" / folders[row["id"]]) if row["id"] in folders else ""
+        return rows
 
     @staticmethod
     def _defender_brief() -> dict:
@@ -227,6 +239,7 @@ class Api:
             "setting": self._setting, "finding/status": self._finding_status, "contain": self._contain, "approve": self._approve,
             "undo": self._undo, "isolate": self._isolate, "quarantine": self._quarantine, "harden": self._harden,
             "baseline": self._baseline, "triage": self._triage, "ask": self._ask, "defender": self._defender, "selftest": self._selftest,
+            "addon": self._addon,
         }.get(path)
         if handler is None:
             raise ApiError("unknown request")
@@ -399,10 +412,7 @@ class Api:
     def _baseline(self, body: dict) -> dict:
         store = self._store()
         try:
-            n = store.baseline_accept()
-            for r in store.findings((OPEN,)):
-                if r["rule"].startswith("baseline.new."):
-                    store.set_status(r["id"], RESOLVED, "accepted into the baseline")
+            n = scan.accept_baseline(store)
         finally:
             store.close()
         return {"ok": True, "message": f"Baseline accepted ({n} new item(s) marked as known). Later scans report what changes."}
@@ -464,6 +474,19 @@ class Api:
             return {"ok": res.get("ok"), "message": res.get("detail")}
         return self.tasks.start({"quick": "Defender quick scan", "full": "Defender full scan", "update": "Update Defender definitions"}[what],
                                 work, kind="defender", exclusive=True)
+
+    def _addon(self, body: dict) -> dict:
+        """Download or remove one optional add-on. Only the pinned add-ons exist; nothing else can be named."""
+        addon_id, what = body.get("id"), body.get("what")
+        if what not in ("install", "remove") or not isinstance(addon_id, str) or addons.plan(addon_id) is None:
+            raise ApiError("unknown add-on request")
+        title = next(c["title"] for c in components.CATALOG if c["id"] == addon_id)
+
+        def work(log):
+            res = addons.install(addon_id, log=log) if what == "install" else addons.remove(addon_id)
+            self._drop("addons")
+            return res
+        return self.tasks.start(("Download " if what == "install" else "Remove ") + title, work, kind="addon", exclusive=True)
 
     def _selftest(self, body: dict) -> dict:
         live = body.get("defender") is True

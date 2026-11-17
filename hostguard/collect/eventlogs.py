@@ -121,6 +121,8 @@ def query(log: str, ids: tuple[int, ...], days: float, max_events: int = 500, ex
             raise LogUnavailable(f"{log}: needs administrator rights (or Event Log Readers membership)")
         if rc in (15007, 15001, 2) or "could not be found" in low or "cannot find" in low:
             raise LogUnavailable(f"{log}: this log does not exist on this PC")
+        if rc == 4201 or "instance name passed was not recognized" in low:
+            raise LogUnavailable(f"{log}: Windows has registered this log but not started it yet. Restart Windows once, then scan again")
         raise util.CollectError(f"{log}: wevtutil failed ({rc}): {(err or out).strip()[:200]}")
     return parse_events(out)
 

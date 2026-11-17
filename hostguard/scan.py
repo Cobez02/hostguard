@@ -30,7 +30,7 @@ from .detect import network as d_network
 from .detect import persistence as d_persist
 from .detect import processes as d_proc
 from .detect import system as d_system
-from .model import Finding, SEV_ORDER, cap_severity, verdict
+from .model import OPEN, RESOLVED, Finding, SEV_ORDER, cap_severity, verdict
 from .store import Store
 
 PROFILES = ("quick", "full", "deep")
@@ -128,6 +128,18 @@ def _new_autorun_severity(data: dict, sig_map: dict) -> tuple[str, str]:
     if not sig or sig.get("status") in ("Unreadable", "Missing"):
         return "medium", "the program it starts could not be checked"
     return "medium", f"the program it starts is {sigs.describe(sig)}"
+
+
+def accept_baseline(store: Store) -> int:
+    """Treat everything present now as known, and close the findings whose only message was "this is new".
+
+    The monitor reports a new autorun as it appears and a scan reports it against the baseline. Both
+    are answered by the same decision, so both are closed by it."""
+    marked = store.baseline_accept()
+    for row in store.findings((OPEN,)):
+        if row["rule"].startswith("baseline.new.") or row["rule"] == "monitor.new_autorun":
+            store.set_status(row["id"], RESOLVED, "accepted into the baseline")
+    return marked
 
 
 def _baseline_findings(store: Store, sig_map: dict | None = None) -> list[Finding]:
@@ -238,9 +250,19 @@ def run(profile: str = "quick", store: Store | None = None, cfg: dict | None = N
     facts.update(processes=procs, connections=conns)
     # ---- optional add-ons, used only when you have installed them
     extra_dirs = list((cfg.get("scan") or {}).get("extra_dirs") or [])
-    yara_matches = stage("yara", lambda: components.yara_scan(c_files.risky_folders(extra_dirs), log=log), []) \
-        if components.find("yara") and components.yara_rules() else []
-    hollows = stage("hollows_hunter", lambda: components.hollows_scan(log=log), None) if components.find("hollows_hunter") else None
+    def run_yara() -> list[dict]:
+        # Every scan: the files this scan singled out, in one run. A deep scan also walks the download
+        # folders. Temp is left to the first pass: it can hold a million files.
+        found = components.yara_scan_files([f["path"] for f in file_facts.get("files") or [] if f.get("path")], log=log)
+        if deep:
+            temp = os.path.normcase(os.environ.get("TEMP", ""))
+            found += components.yara_scan([d for d in c_files.risky_folders(extra_dirs) if os.path.normcase(d) != temp], log=log)
+        unique = {(m["rule"], m["path"].lower()): m for m in found}
+        return list(unique.values())
+
+    yara_matches = stage("yara", run_yara, []) if components.find("yara") and components.yara_rules() else []
+    has_hollows = bool(components.find("hollows_hunter"))
+    hollows = stage("hollows_hunter", lambda: components.hollows_scan(log=log), None) if deep and has_hollows else None
 
     # ---- signatures
     entries = persist.get("entries") or []
@@ -321,6 +343,8 @@ def run(profile: str = "quick", store: Store | None = None, cfg: dict | None = N
         notes.append(f"Built-in Sysmon feature on this Windows build: {ed['sysmon_feature']}.")
     if ed.get("hayabusa_signer"):
         notes.append(f"Hayabusa: {ed['hayabusa_signer']}.")
+    if has_hollows and not deep:
+        notes.append("Hollows Hunter is installed. It takes about a minute, so it runs in a deep scan only.")
     coverage["notes"] = notes
 
     # ---- record

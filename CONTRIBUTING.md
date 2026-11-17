@@ -7,7 +7,8 @@ kind, especially with an example that reproduces them.
 
 Tests pin most of these. A change that breaks one needs a very good reason.
 
-- **Standard library only.** No dependencies and no downloads at run time.
+- **Standard library only.** No dependencies. Nothing is downloaded unless the user asks for an
+  add-on, and then only a file pinned by address, size and SHA-256 in `hostguard/addons.py`.
 - **The model advises, code decides.** The agent's tools are read-only. A "benign" verdict never
   closes or cancels anything.
 - **Read back, never assume.** A switch shows what Windows reports, not what was clicked. An

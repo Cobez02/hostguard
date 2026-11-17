@@ -84,7 +84,8 @@ def cmd_disposition(a, store: Store) -> int:
 
 def cmd_baseline(a, store: Store) -> int:
     if a.what == "accept":
-        n = store.baseline_accept()
+        from . import scan
+        n = scan.accept_baseline(store)
         print(f"Baseline accepted: {n} item(s) marked as known. Later scans report what is new.")
     else:
         t = store.baseline_time()
@@ -340,7 +341,20 @@ def cmd_selftest(a, store: Store) -> int:
 
 
 def cmd_components(a, store: Store) -> int:
-    from . import components
+    from . import addons, components
+    if a.what in ("install", "remove"):
+        plan = addons.plan(a.name or "")
+        if not plan:
+            raise SystemExit("name one of the downloadable add-ons: " + ", ".join(addons.PINS))
+        if a.what == "install":
+            print(f"Pinned on {plan['pinned_on']}; each file must match its SHA-256 or it is thrown away:")
+            for f in plan["files"]:
+                print(f"  {f['name']} ({f['size_text']}) from {f['source']}")
+            res = addons.install(a.name, log=lambda line: print("  " + line, flush=True))
+        else:
+            res = addons.remove(a.name)
+        print(res["message"])
+        return 0 if res.get("ok") else 1
     rows = components.status()
     if a.json:
         _out(rows)
@@ -491,7 +505,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--defender", action="store_true", help="also drop an EICAR test file to confirm Defender reacts")
     p.set_defaults(fn=cmd_selftest)
 
-    p = sub.add_parser("components", help="optional open-source add-ons and whether they are installed")
+    p = sub.add_parser("components", help="optional open-source add-ons: list them, download one, remove one")
+    p.add_argument("what", nargs="?", choices=("list", "install", "remove"), default="list")
+    p.add_argument("name", nargs="?", help="yara, hollows_hunter or hayabusa")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_components)
     return ap

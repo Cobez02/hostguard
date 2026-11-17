@@ -17,6 +17,8 @@ credited to you if you want that, and mentioned in the release notes.
 - A way around a containment guardrail: the processes, files, services and accounts that can
   never be targets.
 - A way to make the dashboard answer a request that did not come from its own signed-in page.
+- A way to make HostGuard download, unpack or run anything other than the add-on files pinned in
+  `hostguard/addons.py`, or to write outside an add-on's folder while unpacking one.
 - A flaw in the elevated helper, `hostguard/ps/elevated.ps1`. It must refuse everything it was not
   built to do, whatever arguments it is given.
 
