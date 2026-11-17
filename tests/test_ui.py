@@ -450,6 +450,15 @@ class Page(unittest.TestCase):
             self.assertNotIn(banned, page._JS)
         self.assertEqual(re.findall(r"setTimeout\(\s*[\"'`]", page._JS), [], "timers take functions, never text")
 
+    def test_nothing_on_the_page_moves_by_itself(self):
+        """A switch must never be drawn, even for one frame, in a state other than the one read back."""
+        self.assertIsNone(re.search(r"\btransition\s*:|\banimation(?:-name)?\s*:|@keyframes", page._CSS))
+
+    def test_the_page_brings_no_fonts_and_names_ones_windows_has(self):
+        self.assertNotIn("@font-face", page._CSS)
+        for family in ("Bahnschrift", "Sitka", "Consolas"):
+            self.assertIn(family, page._CSS)
+
     def test_every_element_the_script_uses_exists(self):
         ids = set(re.findall(r'\bid="([A-Za-z0-9_-]+)"', page._BODY))
         used = set(re.findall(r'\$\("([A-Za-z0-9_-]+)"\)', page._JS))

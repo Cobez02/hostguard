@@ -18,6 +18,10 @@ Tests pin most of these. A change that breaks one needs a very good reason.
 - **Text from the PC is data.** It never becomes part of a command line and never becomes markup
   on the dashboard.
 - **Unknown is not guilty.** A fact that could not be read is reported as unread, not as bad.
+- **On the page, colour is state.** A signal colour is a fill for a severity or an alarm, never
+  decoration, and controls are drawn in ink. A state that is as it should be gets no mark. The
+  typefaces are ones Windows ships, so the page loads nothing. `hostguard/page.py` opens with the
+  full set of rules.
 - A new detection rule comes with a test for what must fire and a test for what must stay quiet.
 
 ## Working on it

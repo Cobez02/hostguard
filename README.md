@@ -123,7 +123,7 @@ It does not protect against a program already running as you. That program can r
 
 | Response | Hardening |
 |---|---|
-| ![The Response tab: containment policy, network isolation, quarantine and the action log](docs/screenshots/response.png) | ![The Hardening tab: Windows protections as switches, and optional add-ons](docs/screenshots/hardening.png) |
+| ![The Response tab: containment policy, network isolation, quarantine and the action log](docs/screenshots/response.png) | ![The Hardening tab: Windows protections as switches that say what Windows reports](docs/screenshots/hardening.png) |
 
 ## Commands
 
@@ -225,7 +225,7 @@ quarantined files into AppData through Windows' transfer service so they land in
 python -m unittest discover -s tests
 ```
 
-234 tests. They cover the rules (what must fire and what must not), they exercise containment
+236 tests. They cover the rules (what must fire and what must not), they exercise containment
 for real on throwaway processes, files and registry values that the tests create themselves,
 they send the dashboard the requests a hostile web page could forge and check each is refused,
 and they feed the add-on downloader altered files, hostile archives and foreign addresses.

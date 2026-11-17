@@ -18,7 +18,7 @@ from pathlib import Path
 os.environ["HOSTGUARD_HOME"] = tempfile.mkdtemp(prefix="hostguard-demo-")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hostguard import __version__, components, harden, ui  # noqa: E402
+from hostguard import __version__, addons, components, harden, ui  # noqa: E402
 from hostguard.api import ApiError  # noqa: E402
 
 NOW = time.time()
@@ -123,6 +123,8 @@ def _status() -> dict:
         "agent": {"ok": True, "local": True, "message": f"ready: {MODEL}", "model": MODEL, "models": [MODEL, "llama3.3:latest"], "loaded": [MODEL]},
         "defender": {"realtime": True, "tamper": True, "signature_age_days": 0, "quick_scan_age_days": 1, "version": "1.463.330.0"},
         "addons": [{"id": c["id"], "title": c["title"], "installed": c["id"] == "yara", "adds": c["adds"], "get": c["get"],
+                    "licence": c["licence"], "download": addons.plan(c["id"]), "folder": os.path.join(USER, ".hostguard", "tools", c["folder"]),
+                    "managed_version": addons.PINS[c["id"]]["version"] if c["id"] == "yara" else None,
                     "detail": USER + r"\.hostguard\tools\yara\yara64.exe; 1 rule file(s)" if c["id"] == "yara" else "not installed",
                     "place": c["place"].format(dir=USER + r"\.hostguard\tools" + "\\" + c["folder"])} for c in components.CATALOG],
         "trusted_paths": [r"C:\Lab\samples"], "sandboxed_python": False, "state_folder": USER + r"\.hostguard",
