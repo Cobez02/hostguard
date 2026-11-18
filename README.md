@@ -10,7 +10,7 @@ on Windows. What a home PC lacks is the layer above the engine, which Microsoft 
 for Endpoint: an answer to "am I compromised?", visibility into what starts by itself and what
 ran, containment, and someone to investigate. HostGuard is that layer.
 
-![The Overview tab: the verdict, the protection state, a containment request waiting for approval and the agent's log](docs/screenshots/overview.png)
+![The Overview tab: the verdict, a containment request waiting for approval, the scan buttons and the protection switches](docs/screenshots/overview.png)
 
 *The pictures show the demo (`python tools/demo.py`), which serves the dashboard with invented data.*
 
@@ -63,10 +63,10 @@ HostGuard does not catch more malware than Defender. It answers the questions De
 | **Change tracking** | Accept a baseline once. Later scans flag each new autorun, account, administrator, listening port, root certificate and browser extension. A new autorun is graded by what it starts, so a signed program updating itself is listed without changing the verdict. |
 | **Containment** | Suspend or stop a process, quarantine a file, switch off an autorun, block an address, cut the PC off the network. Reversible actions have an Undo. Guardrails are code: core Windows processes and files can never be targets. |
 | **Automatic containment** | Off, ask first (default), or automatic. Automatic only touches unsigned programs and script hosts, only with reversible actions, never raises a UAC prompt, and stops at an hourly limit. |
-| **Real-time monitor** | Watches new processes, connections, autoruns, downloads and log events, runs the same rules, applies the policy and raises a Windows notification. |
+| **Real-time monitor** | Watches new processes, connections, autoruns, downloads, log events and Defender's own state, and the canaries if you placed them. It runs the same rules, applies the policy and raises a Windows notification. |
 | **Ransomware canaries** | Optional. Hidden decoy documents where a walk of your folders starts. The monitor compares their contents, owner and permissions every few seconds, and a decoy that is no longer a document is a critical finding. See [Ransomware canaries](#ransomware-canaries). |
 | **Triage agent** | A language model investigates a finding with 15 read-only tools and reports a verdict with its evidence. It runs on a local model through Ollama by default, so it costs nothing and nothing leaves the PC. |
-| **Hardening** | The free Windows protections that are off by default (attack surface reduction rules, unwanted-app blocking, ransomware folder protection, command-line and script logging, Sysmon), as switches that show Windows' real state. |
+| **Hardening** | The free Windows protections that are off by default (attack surface reduction rules, unwanted-app blocking, ransomware folder protection, command-line and script logging, Sysmon), as switches that show Windows' real state. A switch you flipped can be put back from the action log. |
 | **Dashboard** | All of the above as one local web page: the verdict, findings with their evidence, approvals, switches and logs. |
 
 ## Why it is built this way
@@ -138,21 +138,27 @@ status | findings | show ID      what is open
 allow ID | resolve ID | reopen ID
 baseline accept|status
 contain ACTION --finding ID [--dry-run]     suspend kill quarantine disable_autorun block_ip ...
+contain ACTION pid=N | path=FILE | ip=ADDRESS   the same, on something you name yourself
 undo ACTION_ID | actions [pending|approve N|deny N]
-quarantine list|restore ID|delete ID
+quarantine list|restore ID|delete ID --yes
 isolate on|off|status
 monitor start|stop|status|run
 canary [status|on|off|replace]   ransomware canaries: place them, read their state, take them away
 triage [ID] | ask "question"     the agent
 harden status|apply NAME|revert NAME
-components [install|remove NAME] | selftest [--defender] | report | config | reset
+components [install|remove NAME] | selftest [--defender] | report
+config [set KEY VALUE] | reset --yes
 ```
 
-Scan exit codes: 0 clean or review, 1 suspicious, 2 signs of compromise.
+The commands that list or show something take `--json`.
+
+Exit codes: `scan` ends with 0 for clean or review, 1 for suspicious and 2 for signs of compromise.
+`canary status` ends with 1 while a canary finding of high or critical severity stands.
 
 ## Settings
 
 `~/.hostguard/config.json`, the dashboard, or `hostguard config set containment.mode auto`.
+`hostguard config` prints every setting. The table has the ones you are most likely to change.
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -177,27 +183,41 @@ Ransomware works through the disk and rewrites every document it reaches. A cana
 folder of four decoy documents with one more hidden decoy beside it. Their names start with `!`,
 which sorts first, so a program working through a folder meets a decoy before a real file, whether
 it takes the folder's own files first or goes into the subfolders first. Each decoy is a real
-Word, Excel, PDF or PNG file, different on every PC, that says inside what it is.
+Word, Excel, PDF or PNG file, different on every PC, and the three documents say inside what they
+are.
 
 One canary goes into your profile folder, into Desktop, Documents, Pictures, Downloads, Music and
 Videos wherever Windows really keeps them, into Public Documents, and at the top of each fixed
 drive. The switch lists the places before it creates anything, and a place Windows will not let
-HostGuard write to is skipped.
+HostGuard write to is skipped. At the top of the system drive Windows allows a new folder but not
+a new file, so that canary is the folder alone.
 
-HostGuard records each decoy's contents, owner and access list from the disk when it places it.
-The monitor compares them every three seconds, and every scan compares them too.
+HostGuard records each decoy's contents, owner and permissions from the disk when it places it.
+The monitor looks every three seconds. Each time it compares owner and permissions, and it reads a
+decoy again if its size or time has moved. Every half minute it reads all of them again, which
+catches a rewrite that put both back. Every scan compares them too.
 
 | What happened to a decoy | Finding |
 |---|---|
 | It is no longer a document at all, it was swapped for another file, or a ransom note sits beside it | critical, `canary.ransomware` |
 | It was deleted and nothing was left in its place | high, `canary.destroyed` |
-| Its owner or its access list changed, or HostGuard was locked out of it | high, `canary.permissions` |
+| Its owner changed, a permission was added to it or taken off it, Windows' own file encryption was switched on for it, or HostGuard was locked out of it | high, `canary.permissions` |
 | It was edited and is still a sound document, or an ordinary new file sits beside it | medium, `canary.edited` |
 | Only a permission handed down from the folder above changed, or a mark such as Read-only | low, `canary.settings` |
 
-There is one canary finding at a time, named for the strongest thing seen. "Still a sound
-document" is checked, not guessed: Word, Excel and PNG files carry checksums that encryption
-breaks, so an editor or a sync service saving a decoy is told apart from something overwriting it.
+There is one canary finding at a time, named for the strongest thing seen. Two of the comparisons
+behind it are checked, not guessed:
+
+- **Still a sound document.** Word, Excel and PNG files carry checksums that encryption breaks,
+  and a PDF loses its header or the table of its parts. So an editor or a sync service saving a
+  decoy is told apart from something overwriting it.
+- **Who may do what.** Permissions are compared by what they grant, not by how Windows stores
+  them. A tool that rewrites a file's access list and leaves the same accounts with the same
+  rights raises nothing.
+
+A folder that is not there, such as an unplugged drive, and a decoy that another program has open
+are reported as not checked, never as changed. HostGuard's own list of its canaries is watched as
+well: overwriting it is a finding, and a running monitor carries on from the copy it remembers.
 
 A canary says that something is rewriting files. It cannot say which program. When the critical
 finding is raised, HostGuard reads Windows' own counters twice, a second apart, and lists the
@@ -205,9 +225,10 @@ programs that wrote most in between as evidence. One that is unsigned, or is one
 script hosts, becomes a finding of its own with a request to suspend it. That is a lead and is
 worded as one: the counters cover everything a program writes, to disk, pipes and the network.
 
-`hostguard canary replace`, or **Replace the canaries**, puts a fresh set down under a new name.
-Turning them off deletes only the decoys that are still exactly what was placed. One that was
-changed stays where it is.
+Marking the finding as dealt with holds until something else changes. `hostguard canary replace`,
+or **Replace the canaries**, puts a fresh set down under a new name and closes it. Turning the
+canaries off deletes only the decoys that are still exactly what was placed. One that was changed
+stays where it is.
 
 ## Optional open-source add-ons
 
@@ -252,18 +273,20 @@ Read these before relying on it.
   legitimately (reported as low when the program is signed).
 - **Isolation covers this PC's own programs.** Containers and virtual machines route separately.
 - **Canaries are a tripwire, not a wall.** They are checked every three seconds, not at the moment
-  of the write, and nothing is stopped unless you approve the request or run automatic containment
-  with thresholds that include a high finding of medium confidence. A program that starts in a
-  folder without a canary, or that skips hidden files, reaches your files first. A folder that
-  OneDrive syncs takes its canary along. They have been tripped by a stand-in that rewrites and
-  renames files in a throwaway folder, where the alarm came 1.3 seconds after the first file, and
-  never by real ransomware.
+  of the write, and nothing is stopped unless you approve the request. Automatic containment acts
+  on it only if you lower its thresholds to high severity and medium confidence, and only when one
+  unsigned program or script host is clearly writing the most. A program that starts in a folder
+  without a canary, or that skips hidden files, reaches your files first. A folder that OneDrive
+  syncs takes its canary along. They have been tripped by a stand-in that rewrites and renames
+  files in a throwaway folder, where the alarm came 1.3 seconds after the first file, and never by
+  real ransomware.
 - **A local model can be wrong.** Its verdict is shown with its evidence so you can check it.
-- **Not live-tested:** network isolation, address blocking, elevated quarantine and running
-  Hayabusa. Those paths are covered by dry-run and stand-in tests that prove each request is
-  validated and what it would change, not that Windows accepts it. The administrator scan, the
-  add-on downloads and eight of the hardening switches have been used for real on one Windows 11
-  PC.
+- **Not live-tested:** network isolation, address blocking, elevated quarantine, undoing a
+  hardening switch from the action log, and running Hayabusa. Those paths are covered by dry-run
+  and stand-in tests that prove each request is validated and what it would change, not that
+  Windows accepts it. The administrator scan, the add-on downloads and eight of the hardening
+  switches have been used for real on one Windows 11 PC. The canaries have been placed in
+  throwaway folders only.
 
 ## Microsoft Store Python
 
@@ -277,7 +300,7 @@ quarantined files into AppData through Windows' transfer service so they land in
 python -m unittest discover -s tests
 ```
 
-279 tests. They cover the rules (what must fire and what must not), they exercise containment
+287 tests. They cover the rules (what must fire and what must not), they exercise containment
 for real on throwaway processes, files and registry values that the tests create themselves,
 they place canaries in throwaway folders and overwrite, rename, delete, lock and re-permission them,
 they send the dashboard the requests a hostile web page could forge and check each is refused,
@@ -303,6 +326,10 @@ hostguard/
   components.py addons.py  optional add-ons: running them, and downloading pinned releases
   ui.py page.py api.py  the dashboard: server, page, and the requests behind it
   launch.py shortcuts.py  how background processes and shortcuts start HostGuard
+  cli.py store.py model.py  the commands, the SQLite state, what a finding is
+  defender.py report.py selftest.py  Defender's scanner, reports, the self-test
+  winapi.py sigs.py reg.py  Windows calls, signature checks, registry reads
+  util.py paths.py pe.py lnk.py  helpers, settings and state folder, readers for programs and shortcuts
   ps/                   PowerShell: collectors, the elevated helper
   assets/               the icon
 tools/                  demo.py (the dashboard with invented data), make_icon.py
