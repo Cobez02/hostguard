@@ -25,6 +25,8 @@ _SETTINGS = {"containment.mode", "containment.auto_min_severity", "containment.a
              "containment.isolate_on_critical", "containment.agent_can_escalate", "containment.max_auto_actions_per_hour",
              "agent.endpoint", "agent.model", "agent.online_lookups", "agent.keep_alive", "monitor.notify", "trusted.paths",
              "scan.lookback_days", "scan.extra_dirs"}
+# Undoing these goes through the administrator helper, so Windows shows a prompt first.
+_UNDO_ASKS_WINDOWS = {"harden", "unblock_ip", "release", "service", "enable_user"}
 
 
 class ApiError(ValueError):
@@ -163,6 +165,8 @@ class Api:
             rb = a.get("rollback") or {}
             if not a["ok"] or a.get("undone") or not rb.get("kind"):
                 return False
+            if rb["kind"] == "harden":
+                return rb.get("setting") not in harden.ONE_WAY               # a switch with no way back has no Undo
             return rb["kind"] != "restore" or rb.get("item") in in_vault     # a file already put back cannot be put back again
         d = self._cached("defender", 20, lambda: self._defender_brief())
         return {
@@ -368,10 +372,13 @@ class Api:
         def work(log):
             s = Store()
             try:
+                row = s.get_action(action_id) or {}
+                if (row.get("rollback") or {}).get("kind") in _UNDO_ASKS_WINDOWS and row.get("ok") and not row.get("undone"):
+                    log("Asking Windows for administrator rights (approve the UAC prompt)...")
                 res = contain.undo(s, action_id)
             finally:
                 s.close()
-            self._drop("isolation", "hardening")
+            self._drop("isolation", "hardening", "defender")
             return res
         return self.tasks.start(f"Undo action #{action_id}", work)
 

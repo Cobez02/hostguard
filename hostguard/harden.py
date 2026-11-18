@@ -55,6 +55,8 @@ CATALOG = [
      "Any program running as you could trigger it. It can only cut the network; restoring it still needs your approval."),
 ]
 _BY_ID = {c[0]: c for c in CATALOG}
+# Switches HostGuard can turn on and not off again. Turning one on leaves nothing to undo from here.
+ONE_WAY = {"sysmon"}
 
 
 def _states() -> dict[str, bool | None]:
@@ -116,7 +118,8 @@ def set_state(store, setting: str, on: bool, dry_run: bool = False) -> dict:
         store.log_action("operator", "harden:" + setting, {"type": "setting", "name": setting, "on": bool(on)}, None,
                          state="done" if res.get("ok") else "failed", ok=bool(res.get("ok")),
                          result={"message": res.get("message"), "changes": res.get("changes")},
-                         rollback={"kind": "harden", "setting": setting, "on": not on} if res.get("ok") else None)
+                         rollback={"kind": "harden", "setting": setting, "on": not on}
+                         if res.get("ok") and setting not in ONE_WAY else None)
     if res.get("ok"):
         res["message"] = f"{_BY_ID[setting][2]}: now {'on' if on else 'off'}"
     return res

@@ -451,6 +451,34 @@ class DashboardApi(unittest.TestCase):
         self.assertTrue(os.path.exists(target))
         self.assertNotIn(aid, [p["id"] for p in self.api.get("status", {})["pending"]])
 
+    def test_a_hardening_entry_can_be_undone_from_the_action_log(self):
+        """The administrator helper and Windows' answer are stand-ins here: no setting on this PC is touched."""
+        from unittest import mock
+        from hostguard import harden
+
+        def logged(setting):
+            s = Store()
+            try:
+                return s.log_action("operator", "harden:" + setting, {"type": "setting", "name": setting, "on": True}, None, state="done",
+                                    ok=True, result={"message": "x"}, rollback={"kind": "harden", "setting": setting, "on": False})
+            finally:
+                s.close()
+        entry, one_way = logged("pua_block"), logged("sysmon")          # the second as older versions recorded it
+        rows = {a["id"]: a for a in self.api.get("status", {})["actions"]}
+        self.assertEqual((rows[entry]["undoable"], rows[one_way]["undoable"]), (True, False))
+        asked = []
+
+        def helper(verb, args=None, timeout=300, dry_run=False):
+            asked.append((verb, dict(args or {})))
+            return {"ok": True, "declined": False, "message": "set", "changes": []}
+        with mock.patch.object(harden.elevate, "run", helper), mock.patch.object(harden, "_states", lambda: {"pua_block": False}):
+            task = self.wait(self.api.post("undo", {"action_id": entry})["task"])
+        self.assertEqual((task["state"], asked), ("done", [("harden", {"setting": "pua_block", "on": False})]), task["log"])
+        self.assertIn("administrator rights", task["log"][0])
+        self.assertEqual(task["log"][-1], "Done: Block potentially unwanted apps: now off")
+        rows = {a["id"]: a for a in self.api.get("status", {})["actions"]}
+        self.assertEqual((rows[entry]["undone"] is not None, rows[entry]["undoable"]), (True, False))
+
     def test_only_one_scan_at_a_time_but_actions_are_never_queued_behind_it(self):
         import threading
         gate = threading.Event()

@@ -519,6 +519,15 @@ def undo(store, action_id: int, actor: str = "operator") -> dict:
         res = _release(actor)
     elif kind == "enable_user":
         res = _user({"name": rb["name"]}, actor, enable=True)
+    elif kind == "harden":
+        from . import harden
+        if rb.get("setting") in harden.ONE_WAY:
+            # Older versions recorded a way back for these. There is none, and asking Windows would only
+            # raise a prompt for the helper to refuse.
+            return {"ok": False, "message": f"'{row['action']}' cannot be undone: that switch can be turned on from here and not off"}
+        # The switch is put back the way the switch itself does it, read back from Windows and all.
+        # Nothing is logged in there: the "undo" entry written below is the record of it.
+        res = harden.set_state(None, str(rb.get("setting")), bool(rb.get("on")))
     else:
         return {"ok": False, "message": f"no undo for {kind}"}
     if res.get("ok"):

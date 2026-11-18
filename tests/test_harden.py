@@ -10,8 +10,10 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -20,7 +22,8 @@ WINDOWS = os.name == "nt"
 _TMP = tempfile.mkdtemp(prefix="hg-test-harden-")
 os.environ["HOSTGUARD_HOME"] = os.path.join(_TMP, "state")
 
-from hostguard import harden, util  # noqa: E402
+from hostguard import contain, harden, util  # noqa: E402
+from hostguard.store import Store  # noqa: E402
 
 
 def setUpModule():
@@ -90,6 +93,82 @@ class SwitchesReadWindowsCorrectly(unittest.TestCase):
         self.assertFalse(self.states(ids, [0] * len(ids))["asr_standard"])
         self.assertFalse(self.states(None, None)["asr_standard"], "no rules at all")
         self.assertFalse(self.states([], [])["asr_extended"])
+
+
+class UndoingASwitch(unittest.TestCase):
+    """Undo on a hardening entry of the action log. The administrator helper and Windows' answers are
+    stand-ins here: no setting on this PC is touched."""
+
+    def setUp(self):
+        self.store = Store(os.path.join(_TMP, f"undo-{time.time_ns()}.db"))
+        self.addCleanup(self.store.close)
+        self.windows = {}             # what "Windows" reports for each switch
+        self.asked = []
+        self.obeys = True             # False: the helper says done and Windows keeps the setting anyway
+        self.answer = {"ok": True, "declined": False, "message": "set", "changes": ["one change"]}
+
+        def helper(verb, args=None, timeout=300, dry_run=False):
+            self.asked.append((verb, dict(args or {})))
+            if self.answer["ok"] and self.obeys:
+                self.windows[args["setting"]] = args["on"]
+            return dict(self.answer)
+        for target, name, stand_in in ((harden.elevate, "run", helper), (harden, "_states", lambda: dict(self.windows))):
+            patch = mock.patch.object(target, name, stand_in)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def entry(self):
+        return self.store.actions(limit=1)[0]
+
+    def test_undo_puts_the_switch_back_and_reads_windows_again(self):
+        self.assertTrue(harden.set_state(self.store, "pua_block", True)["ok"])
+        entry = self.entry()
+        self.assertEqual((entry["action"], entry["rollback"]), ("harden:pua_block", {"kind": "harden", "setting": "pua_block", "on": False}))
+        undone = contain.undo(self.store, entry["id"])
+        self.assertEqual((undone["ok"], undone["message"]), (True, "Block potentially unwanted apps: now off"))
+        self.assertEqual((self.asked[-1], self.windows["pua_block"]), (("harden", {"setting": "pua_block", "on": False}), False))
+        self.assertEqual([(a["action"], a["state"]) for a in self.store.actions(limit=5)],
+                         [("undo:harden:pua_block", "done"), ("harden:pua_block", "undone")], "one entry for the undo, and no third one")
+        self.assertEqual(contain.undo(self.store, entry["id"])["message"], "that action was already undone")
+
+    def test_turning_a_switch_off_can_be_undone_too(self):
+        self.windows["rdp_off"] = True
+        self.assertTrue(harden.set_state(self.store, "rdp_off", False)["ok"])
+        self.assertTrue(contain.undo(self.store, self.entry()["id"])["ok"])
+        self.assertEqual((self.asked[-1][1], self.windows["rdp_off"]), ({"setting": "rdp_off", "on": True}, True))
+
+    def test_an_undo_windows_did_not_take_is_not_recorded_as_done(self):
+        harden.set_state(self.store, "network_protection", True)
+        entry = self.entry()
+        self.obeys = False                                  # Tamper Protection or a policy keeps the setting
+        undone = contain.undo(self.store, entry["id"])
+        self.assertFalse(undone["ok"])
+        self.assertIn("Windows still reports", undone["message"])
+        self.assertEqual((self.store.get_action(entry["id"])["undone"], self.store.get_action(entry["id"])["state"]), (None, "done"))
+        self.answer = {"ok": False, "declined": True, "message": "administrator access was declined, so nothing was changed"}
+        self.assertTrue(contain.undo(self.store, entry["id"]).get("declined"))
+        self.assertEqual(self.store.get_action(entry["id"])["state"], "done")
+        self.assertEqual(len(self.store.actions(limit=5)), 1, "a failed undo leaves no entry of its own")
+
+    def test_a_switch_with_no_way_back_has_nothing_to_undo(self):
+        self.assertEqual(harden.ONE_WAY, {"sysmon"})
+        self.assertTrue(harden.set_state(self.store, "sysmon", True)["ok"])
+        entry = self.entry()
+        self.assertEqual(entry["rollback"], {})
+        self.assertIn("cannot be undone", contain.undo(self.store, entry["id"])["message"])
+        self.assertEqual(len(self.asked), 1)
+        older = self.store.log_action("operator", "harden:sysmon", {"type": "setting", "name": "sysmon", "on": True}, None, state="done",
+                                      ok=True, result={"message": "x"}, rollback={"kind": "harden", "setting": "sysmon", "on": False})
+        refused = contain.undo(self.store, older)             # an entry as older versions recorded it, with a way back that never existed
+        self.assertEqual((refused["ok"], "cannot be undone" in refused["message"]), (False, True))
+        self.assertEqual((len(self.asked), self.store.get_action(older)["state"]), (1, "done"), "Windows is not asked for what the helper would refuse")
+
+    def test_an_entry_naming_a_switch_that_does_not_exist_changes_nothing(self):
+        bogus = self.store.log_action("operator", "harden:x", {"type": "setting", "name": "x"}, None, state="done", ok=True,
+                                      result={"message": "x"}, rollback={"kind": "harden", "setting": "no_such_switch", "on": False})
+        res = contain.undo(self.store, bogus)
+        self.assertEqual((res["ok"], self.asked), (False, []))
+        self.assertIn("unknown setting", res["message"])
 
 
 if __name__ == "__main__":
