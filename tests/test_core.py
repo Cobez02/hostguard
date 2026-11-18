@@ -384,8 +384,11 @@ class DashboardApi(unittest.TestCase):
     def test_status_has_what_the_page_needs(self):
         st = self.api.get("status", {})
         for key in ("verdict", "findings", "pending", "actions", "quarantine", "monitor", "isolation", "containment", "agent",
-                    "defender", "tasks", "trusted_paths", "state_folder", "sandboxed_python", "addons", "notify"):
+                    "defender", "tasks", "trusted_paths", "state_folder", "sandboxed_python", "addons", "notify", "canaries"):
             self.assertIn(key, st)
+        self.assertEqual((st["canaries"]["on"], st["canaries"]["alarm"], st["canaries"]["record"]), (False, None, "none"))
+        self.assertIsInstance(st["canaries"]["plan"], list)
+        self.assertIn("canary_checked", st["monitor"])
         self.assertIn(st["isolation"]["isolated"], (True, False, None))
         self.assertNotIn("api_key", st["agent_cfg"])
         json.dumps(st)   # everything must be serialisable
@@ -404,7 +407,7 @@ class DashboardApi(unittest.TestCase):
                      lambda: self.api.post("harden", {"setting": "nope", "on": True}), lambda: self.api.post("ask", {"question": "?"}),
                      lambda: self.api.post("quarantine", {"what": "restore", "id": "../../x"}),
                      lambda: self.api.post("finding/status", {"id": "zzzz", "status": "allow"}),
-                     lambda: self.api.post("defender", {"what": "uninstall"})):
+                     lambda: self.api.post("defender", {"what": "uninstall"}), lambda: self.api.post("canary", {"on": "yes"})):
             with self.assertRaises(ApiError):
                 call()
         self.assertTrue(issubclass(ApiError, ValueError))

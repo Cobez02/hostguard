@@ -438,6 +438,24 @@ _BODY = r"""
 
   <section class="tab" id="tab-hardening">
     <div class="sheet">
+      <section class="block">
+        <h2>Ransomware canaries</h2>
+        <div class="body">
+          <label class="switch"><input type="checkbox" role="switch" id="swCanary" disabled><span class="track"></span>
+            <span class="txt"><span class="lbl" id="canaryLbl">Canary files</span><span class="small" id="canaryHint" hidden></span></span></label>
+          <dl class="kv" id="canaryKv"></dl>
+          <div class="list" id="canaryPlaces" hidden></div>
+          <div class="row" id="canaryRow" hidden>
+            <button class="b" id="canaryWhere">Show where they are</button>
+            <button class="b" id="canaryFresh">Replace the canaries</button>
+            <button class="b" id="canaryFinding" hidden>Open the finding</button>
+          </div>
+        </div>
+        <p class="note">A canary is a hidden folder of decoy documents, with one more beside it, named to sort first. A
+          program working through your files reaches a decoy before any of them. The real-time monitor compares each
+          decoy's contents, owner and permissions every few seconds, and a change becomes a finding. It cannot say
+          which program made the change. A folder that OneDrive syncs takes its canary along.</p>
+      </section>
       <div id="harden"><p class="muted">Reading the settings from Windows...</p></div>
       <section class="block">
         <h2>Open-source add-ons</h2>
@@ -508,7 +526,8 @@ _JS = r"""
   const TABS = ["overview", "findings", "response", "agent", "hardening", "settings"];
   const ACTION_LABEL = { suspend: "Suspend", resume: "Resume", kill: "Stop for good", quarantine: "Quarantine file",
     disable_autorun: "Switch off autorun", block_ip: "Block address", unblock_ip: "Unblock address", disable_user: "Disable account",
-    defender_scan: "Let Defender clean it", isolate: "Isolate network", release: "Restore network" };
+    defender_scan: "Let Defender clean it", isolate: "Isolate network", release: "Restore network",
+    "canary:place": "Place canary files", "canary:remove": "Remove canary files" };
   const LOCK_TEXT = {
     offline: "The dashboard is not answering. If it was stopped, open it again from the HostGuard shortcut. This page reconnects by itself.",
     signedout: "Signed out: the dashboard was restarted after this page was opened. Open it again from the HostGuard shortcut.",
@@ -572,6 +591,7 @@ _JS = r"""
   }
 
   // An in-page dialog. Without `input` it answers true, "alt" or false; with it, the text or null.
+  // With `info` it only tells: there is nothing to cancel.
   function ask(o) {
     return new Promise((resolve) => {
       const d = $("dlg"), box = $("dlgInput"), wantsText = o.input !== undefined;
@@ -582,6 +602,7 @@ _JS = r"""
       $("dlgOk").textContent = o.ok || "OK";
       $("dlgOk").className = "b " + (o.danger ? "danger" : "primary");
       $("dlgCancel").textContent = o.cancel || "Cancel";
+      $("dlgCancel").hidden = !!o.info;
       $("dlgAlt").hidden = !o.alt;
       $("dlgAlt").textContent = o.alt || "";
       let answered = false;
@@ -610,6 +631,7 @@ _JS = r"""
   };
   const size = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : n > 1024 ? Math.round(n / 1024) + " KB" : n + " B";
   const days = (n) => n === 1 ? "1 day" : n + " days";
+  const places = (n) => n === 1 ? "1 place" : n + " places";
   // "1 high, 2 medium" from a table of counts, or "" when there is nothing to count.
   const tally = (c) => ["critical", "high", "medium", "low"].filter((s) => c[s]).map((s) => c[s] + " " + s).join(", ");
   const needsALook = (severity) => pick(SEVERITY, severity) !== null;
@@ -703,13 +725,13 @@ _JS = r"""
   }
 
   function renderOverview(d) {
-    const v = d.verdict, ls = d.last_scan, open = tally(v.counts);
+    const v = d.verdict, ls = d.last_scan, open = tally(v.counts), trip = canaryAlarm(d);
     $("status").className = "status " + ((ls && pick(LEVEL, v.level)) || "");
     $("verdict").textContent = ls ? v.text : "Not scanned yet";
-    $("verdictWhy").textContent = ls
+    $("verdictWhy").textContent = (trip ? trip.title + ". " : "") + (ls
       ? `Last checked ${ago(ls.ended)} by a ${ls.profile} scan${ls.elevated ? " with administrator data" : ""}. `
         + (open ? `Open findings: ${open}.` : "No open findings.")
-      : "Start with a quick scan. It takes about a minute.";
+      : "Start with a quick scan. It takes about a minute.");
     $("verdictGo").hidden = !(ls && v.level !== "clean");
     kv($("scanKv"), [
       ["Last scan", ls ? `${when(ls.ended)}, ${ls.profile}, ${ls.seconds} s${ls.elevated ? ", with administrator data" : ""}` : "never"],
@@ -717,12 +739,16 @@ _JS = r"""
       ["Baseline", d.baseline_time ? "accepted " + when(d.baseline_time) : "not set yet"],
     ]);
     for (const id of ["scanQuick", "scanFull", "scanDeep", "scanAdmin"]) $(id).disabled = d.scanning;
-    const m = d.monitor || {}, f = d.defender || {}, n = m.counters || {};
+    const m = d.monitor || {}, f = d.defender || {}, n = m.counters || {}, c = d.canaries || {};
     setSwitch("swMonitor", m.running, false);
     setSwitch("swAutostart", m.autostart, false);
     kv($("protKv"), [
       ["Monitor", m.running ? `running (pid ${m.pid}); ${n.processes || 0} new processes, ${n.connections || 0} connections and ${n.findings || 0} findings since it started` : "stopped", m.running ? null : "warn"],
       ["Monitor error", m.last_error, "bad"],
+      ["Canary files", !c.on ? "not placed (see Hardening)"
+        : c.changed ? `${c.changed} of ${c.files} changed, in ${places(c.folders_changed)}`
+        : `${c.files} in ${places(c.folders)}, none changed` + (m.running ? "" : "; not watched while the monitor is off"),
+        c.on && c.changed ? "bad" : c.on && !m.running ? "warn" : null],
       ["Defender real-time", f.error ? "unknown: " + f.error : f.realtime === true ? "on" : f.realtime === false ? "off" : "unknown", f.realtime === false ? "bad" : null],
       ["Tamper protection", f.tamper === true ? "on" : f.tamper === false ? "off" : null, f.tamper === false ? "bad" : null],
       ["Definitions", f.signature_age_days == null ? null : (f.signature_age_days === 0 ? "updated today" : days(f.signature_age_days) + " old") + (f.version ? ` (${f.version})` : "")],
@@ -953,6 +979,38 @@ _JS = r"""
         a.installed || a.managed_version ? el("button", { class: "b danger", text: "Remove", onclick: () => removeAddon(a) }) : null) : null)));
   }
 
+  // The canary finding, while it is open and serious enough to say at the top of the page.
+  function canaryAlarm(d) {
+    const trip = (d.canaries || {}).alarm;
+    return trip && pick(SEVERITY, trip.severity) !== "caution" && needsALook(trip.severity)
+      && d.findings.some((f) => f.id === trip.id && f.status === "open") ? trip : null;
+  }
+
+  // The canaries as they are on disk at this moment, whatever the monitor has or has not reported yet.
+  function renderCanaries(d) {
+    const c = d.canaries || {}, m = d.monitor || {}, unknown = c.record === "damaged" || c.record === "unread";
+    setSwitch("swCanary", c.on === true, unknown);
+    $("canaryLbl").textContent = "Canary files" + (unknown ? " (state unknown)" : "");
+    $("canaryHint").textContent = unknown ? "HostGuard's own list of its canaries cannot be read. Replacing the canaries starts a new list and leaves the old folders where they are."
+      : c.on ? "" : `Turning this on puts hidden decoy documents in each of ${(c.plan || []).length} places.`;
+    $("canaryHint").hidden = !$("canaryHint").textContent;
+    kv($("canaryKv"), c.on ? [
+      ["Decoy documents", c.changed ? `${c.changed} of ${c.files} changed, in ${places(c.folders_changed)}` : `${c.files} in ${places(c.folders)}, none changed`,
+        c.changed ? "bad" : null],
+      ["Not checked", c.unread ? `${c.unread}, because their folder is not there now or they are in use` : null],
+      ["Checked", m.running && m.canary_checked ? `${ago(m.canary_checked)}, by the monitor` : "only during a scan, because the real-time monitor is off",
+        m.running ? null : "warn"],
+      ["Placed", when(c.placed)],
+    ] : []);
+    const odd = (c.places || []).filter((p) => p.state !== "intact");
+    $("canaryPlaces").hidden = !odd.length;
+    paint($("canaryPlaces"), odd, () => odd.map((p) => el("div", { class: "item" },
+      el("div", { class: "mono", text: p.path }), el("div", { class: "small", text: p.note }))));
+    $("canaryRow").hidden = !(c.on || unknown);
+    $("canaryWhere").hidden = !c.on;
+    $("canaryFinding").hidden = !(c.alarm && d.findings.some((f) => f.id === c.alarm.id));
+  }
+
   async function installAddon(a) {
     const dl = a.download;
     const sure = await ask({ title: "Download " + a.title + "?", ok: "Download",
@@ -1025,7 +1083,9 @@ _JS = r"""
   // The lines under the tabs: only what is out of the ordinary, and never what the tab in view already shows.
   function renderNotices(d) {
     const running = d.tasks.filter((t) => t.state === "running").map((t) => t.title), here = S.tab === "overview";
+    const trip = canaryAlarm(d);
     msgs($("msgs"), [
+      trip && !here && [trip.severity === "critical" ? "error" : "warn", trip.title + ". The finding says what to do."],
       running.length && ["info", "Working: " + running.join("; ") + (here ? "." : ". Progress is under Activity on the Overview tab.")],
       d.isolation && d.isolation.isolated === true && ["error", "This PC is isolated from the network. Turn the switch off under Response to reconnect."],
       d.defender && d.defender.realtime === false && ["error", "Microsoft Defender real-time protection is off."],
@@ -1044,7 +1104,7 @@ _JS = r"""
       S.data = d;
       const running = renderNotices(d);
       renderTop(d); renderOverview(d); renderPending(d); renderTasks(d); renderFindings(d); renderResponse(d);
-      renderAgent(d); renderAddons(d); renderSettings(d);
+      renderAgent(d); renderAddons(d); renderCanaries(d); renderSettings(d);
       if (S.tab === "findings") loadDetail(false);
       if (S.working && !running.length && S.tab === "hardening") refreshHardening(true);   // a switch may just have been applied
       S.working = running.length > 0;
@@ -1095,6 +1155,32 @@ _JS = r"""
       text: "Only a 'malicious' verdict with high confidence on a high or critical finding counts. The same guardrails apply and every action can be undone. A model can still be wrong, or be misled by what it reads." })))
       return;
     act("setting", { key: "containment.agent_can_escalate", value: want });
+  });
+  actionSwitch("swCanary", async (want) => {
+    const plan = ((S.data && S.data.canaries) || {}).plan || [];
+    const sure = await ask(want
+      ? { title: "Place canary files?", ok: "Place them",
+          text: "HostGuard will create a hidden folder holding four decoy documents, and one more hidden decoy beside it, in each of these places:\n\n"
+            + plan.map((p) => `${p.root}   (${p.label})`).join("\n")
+            + "\n\nTheir names start with an exclamation mark, so they sort first. A place Windows will not let HostGuard write to is skipped. If OneDrive or another service syncs one of these folders, it syncs the canary too." }
+      : { title: "Remove the canary files?", ok: "Remove them",
+          text: "HostGuard deletes each decoy document that is still exactly as it placed it, and then its folders that are empty. A decoy that has been changed is left where it is." });
+    if (sure) act("canary", { on: want });
+  });
+  $("canaryFresh").addEventListener("click", async () => {
+    if (await ask({ title: "Replace the canaries?", ok: "Replace them",
+      text: "HostGuard removes the decoy documents that are unchanged and puts a fresh set down under a new folder name. Decoys that were changed stay where they are.\n\nDo this once you know why a canary changed." }))
+      act("canary", { on: true });
+  });
+  $("canaryWhere").addEventListener("click", () => {
+    const where = ((S.data && S.data.canaries) || {}).places || [];
+    ask({ title: "Where the canaries are", ok: "Close", info: true,
+      text: where.map((p) => `${p.path}   (${p.label})${p.note ? "\n    " + p.note : ""}`).join("\n")
+        + "\n\nEach folder has one decoy document of the same name beside it. All of them are hidden: Explorer shows them when View > Show > Hidden items is ticked." });
+  });
+  $("canaryFinding").addEventListener("click", () => {
+    const trip = ((S.data && S.data.canaries) || {}).alarm;
+    if (trip) { showTab("findings"); select(trip.id); }
   });
   actionSwitch("swIsolate", async (want) => {
     const sure = await ask(want

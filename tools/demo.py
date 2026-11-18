@@ -102,6 +102,12 @@ ANSWER = {"question": "What is listening on port 4444, and why?", "ok": True, "m
                     "switch off the startup entry."}
 
 
+CANARY = "!Records 4c1e"
+CANARY_ROOTS = [("C:\\", "the top of drive C:"), (USER, "your profile folder"), (USER + r"\Desktop", "Desktop"),
+                (USER + r"\Documents", "Documents"), (USER + r"\Pictures", "Pictures"), (USER + r"\Downloads", "Downloads"),
+                (USER + r"\Music", "Music"), (USER + r"\Videos", "Videos"), (r"C:\Users\Public\Documents", "Public Documents")]
+
+
 def _status() -> dict:
     return {
         "version": __version__, "baseline_time": NOW - 3 * 86400, "scanning": False, "notify": True, "elevated": False,
@@ -114,8 +120,14 @@ def _status() -> dict:
         "findings": FINDINGS, "pending": PENDING, "actions": ACTIONS, "tasks": TASKS, "answer": ANSWER,
         "quarantine": [{"id": "20261114-101502-3fa9c1", "original": USER + r"\Downloads\free_game_trainer.exe", "size": 2411520,
                         "when": NOW - 2 * 86400, "sha256": "4be19c07d2f3a85611e0c9b7a4d36f28905c1e7b3a6d4f8209b5c7e1d3a9f6b2"}],
-        "monitor": {"running": True, "pid": 11872, "autostart": True, "last_error": None,
+        "monitor": {"running": True, "pid": 11872, "autostart": True, "last_error": None, "canary_checked": time.time() - 2,
                     "counters": {"processes": 412, "connections": 1280, "findings": 4}},
+        "canaries": {"on": True, "record": "ok", "placed": NOW - 3 * 86400 + 900, "checked": time.time() - 1,
+                     "folders": len(CANARY_ROOTS), "files": 5 * len(CANARY_ROOTS) - 1, "untouched": 5 * len(CANARY_ROOTS) - 1, "unread": 0,
+                     "changed": 0, "folders_changed": 0, "alarm": None,
+                     "plan": [{"root": root, "label": label} for root, label in CANARY_ROOTS],
+                     "places": [{"path": root.rstrip("\\") + "\\" + CANARY, "label": label, "state": "intact", "note": ""}
+                                for root, label in CANARY_ROOTS]},
         "isolation": {"isolated": False, "outbound_blocked": False, "inbound_blocked": False, "one_click_task": True},
         "containment": {"mode": "ask", "auto_min_severity": "critical", "auto_min_confidence": "high", "process_action": "suspend",
                         "isolate_on_critical": False, "agent_can_escalate": False, "max_auto_actions_per_hour": 10},

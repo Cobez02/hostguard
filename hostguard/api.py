@@ -14,8 +14,9 @@ import secrets
 import threading
 import time
 
-from . import (__version__, addons, agent, components, contain, defender, elevate, harden, monitor, paths, policy, quarantine, report,
-               scan, util, winapi)
+from . import (__version__, addons, agent, canary, components, contain, defender, elevate, harden, monitor, paths, policy, quarantine,
+               report, scan, util, winapi)
+from .detect import canary as d_canary
 from .model import ALLOWED, CONTAINED, OPEN, POSTURE_CATEGORIES, RESOLVED, SEV_ORDER
 from .store import Store
 
@@ -185,6 +186,7 @@ class Api:
             "notify": bool((cfg.get("monitor") or {}).get("notify", True)),
             "agent": self._agent_state(), "answer": self.last_answer, "defender": d,
             "addons": self._cached("addons", 30, self._addons),
+            "canaries": self._cached("canaries", 3, self._canaries),
             "tasks": self.tasks.snapshot(), "scanning": bool(self.tasks.running("scan")),
             "sandboxed_python": paths.python_is_sandboxed(), "state_folder": str(paths.home()), "elevated": winapi.is_elevated(),
         }
@@ -199,6 +201,14 @@ class Api:
             row["managed_version"] = (addons.installed_info(row["id"]) or {}).get("version")
             row["folder"] = str(paths.home() / "tools" / folders[row["id"]]) if row["id"] in folders else ""
         return rows
+
+    @staticmethod
+    def _canaries() -> dict:
+        """The canaries as they are on disk right now, what a rule makes of that, and where a new set would go."""
+        report = canary.check()
+        found = d_canary.detect(report)
+        return {**canary.brief(report), "plan": canary.roots(),
+                "alarm": {"id": found[0].key, "rule": found[0].rule, "severity": found[0].severity, "title": found[0].title} if found else None}
 
     @staticmethod
     def _defender_brief() -> dict:
@@ -239,7 +249,7 @@ class Api:
             "setting": self._setting, "finding/status": self._finding_status, "contain": self._contain, "approve": self._approve,
             "undo": self._undo, "isolate": self._isolate, "quarantine": self._quarantine, "harden": self._harden,
             "baseline": self._baseline, "triage": self._triage, "ask": self._ask, "defender": self._defender, "selftest": self._selftest,
-            "addon": self._addon,
+            "addon": self._addon, "canary": self._canary,
         }.get(path)
         if handler is None:
             raise ApiError("unknown request")
@@ -487,6 +497,25 @@ class Api:
             self._drop("addons")
             return res
         return self.tasks.start(("Download " if what == "install" else "Remove ") + title, work, kind="addon", exclusive=True)
+
+    def _canary(self, body: dict) -> dict:
+        """Place the canaries (replacing a set that is already out) or take them away."""
+        on = body.get("on")
+        if not isinstance(on, bool):
+            raise ApiError("'on' must be true or false")
+
+        def work(log):
+            res = canary.place(log=log) if on else canary.remove(log=log)
+            s = Store()
+            try:
+                s.log_action("operator", "canary:place" if on else "canary:remove",
+                             {"type": "canary", "name": res.get("name") or "canary files"}, None,
+                             state="done" if res.get("ok") else "failed", ok=bool(res.get("ok")), result={"message": res.get("message")})
+            finally:
+                s.close()
+            self._drop("canaries")
+            return res
+        return self.tasks.start("Place canary files" if on else "Remove canary files", work, kind="canary", exclusive=True)
 
     def _selftest(self, body: dict) -> dict:
         live = body.get("defender") is True

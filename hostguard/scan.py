@@ -17,12 +17,13 @@ import re
 import time
 import traceback
 
-from . import components, defender, paths, sigs, util, winapi
+from . import canary, components, defender, paths, sigs, util, winapi
 from .collect import eventlogs as c_events
 from .collect import files as c_files
 from .collect import persistence as c_persist
 from .collect import system as c_system
 from .detect import browsers as d_browsers
+from .detect import canary as d_canary
 from .detect import eventlogs as d_events
 from .detect import files as d_files
 from .detect import memory as d_memory
@@ -247,6 +248,15 @@ def run(profile: str = "quick", store: Store | None = None, cfg: dict | None = N
     file_facts = stage("files", lambda: c_files.collect(profile, cfg, log=log), {"files": []})
     browsers = stage("browsers", lambda: d_browsers.collect(log=log), {"extensions": []})
     memory = stage("memory", lambda: d_memory.collect(procs, me, log=log), {"results": []})
+
+    def _canaries() -> dict:
+        report = canary.check()
+        if report["folders"]:
+            s = report["summary"]
+            log(f"canaries: {s['untouched']} of {s['files']} decoy documents untouched in {s['folders']} place(s)")
+        return report
+
+    canaries = stage("canaries", _canaries, {})
     facts.update(processes=procs, connections=conns)
     # ---- optional add-ons, used only when you have installed them
     extra_dirs = list((cfg.get("scan") or {}).get("extra_dirs") or [])
@@ -289,6 +299,7 @@ def run(profile: str = "quick", store: Store | None = None, cfg: dict | None = N
     judge("files", lambda: d_files.detect(file_facts, sig_map, ctx))
     judge("browsers", lambda: d_browsers.detect(browsers, ctx))
     judge("memory", lambda: d_memory.detect(memory, sig_map, ctx))
+    judge("canaries", lambda: [f for f in d_canary.detect(canaries) if not d_canary.dealt_with(store, f)])
     if yara_matches:
         judge("YARA", lambda: components.yara_findings(yara_matches, sig_map))
     if hollows:
@@ -326,6 +337,7 @@ def run(profile: str = "quick", store: Store | None = None, cfg: dict | None = N
         "memory_inspected": memory.get("inspected", 0), "event_logs": events.get("coverage") or {},
         "signatures_checked": len(sig_map), "lookback_days": days, "gaps": sorted(set(gaps)),
         "addons": {c["id"]: c["installed"] for c in components.status()},
+        "canary_files": (canaries.get("summary") or {}).get("files", 0),
     }
     notes = []
     if blind:
@@ -355,7 +367,7 @@ def run(profile: str = "quick", store: Store | None = None, cfg: dict | None = N
         if cur is None or SEV_ORDER[r["severity"]] > SEV_ORDER[cur["severity"]]:
             dedup[r["id"]] = r
     state_collectors = [c for c in ran if c in ("processes", "network", "persistence", "system", "files", "browsers",
-                                                "memory", "baseline")]
+                                                "memory", "baseline", "canaries")]
     change = store.upsert_findings(run_id, list(dedup.values()), state_collectors)
     open_rows = store.findings(("open",))
     v = verdict(open_rows)

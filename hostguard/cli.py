@@ -278,6 +278,41 @@ def cmd_harden(a, store: Store) -> int:
     return 0 if res.get("ok") else 1
 
 
+def cmd_canary(a, store: Store) -> int:
+    from . import canary
+    from .detect import canary as d_canary
+    if a.what in ("on", "off", "replace"):
+        if a.what == "off":
+            res = canary.remove(log=lambda line: print("  " + line, flush=True))
+        else:
+            print("A hidden folder of decoy documents, and one hidden decoy beside it, go into each of these if Windows allows it:")
+            for w in canary.roots():
+                print(f"  {w['root']}  ({w['label']})")
+            res = canary.place(log=lambda line: print("  " + line, flush=True))
+        store.log_action("operator", "canary:remove" if a.what == "off" else "canary:place",
+                         {"type": "canary", "name": res.get("name") or "canary files"}, None,
+                         state="done" if res.get("ok") else "failed", ok=bool(res.get("ok")), result={"message": res.get("message")})
+        print(("OK: " if res.get("ok") else "FAILED: ") + str(res.get("message")))
+        return 0 if res.get("ok") else 1
+    report = canary.check()
+    found = d_canary.detect(report)
+    b = canary.brief(report)
+    if a.json:
+        _out({**b, "detail": report["folders"], "finding": found[0].to_row() if found else None})
+    elif not b["on"]:
+        print("Canary files: " + ("the record of them cannot be read" if b["record"] in ("damaged", "unread") else
+                                  "not placed. 'hostguard canary on' places them."))
+    else:
+        print(f"Canary files: {b['files']} in {b['folders']} place(s), placed {util.iso(b['placed'])}; "
+              + ("none changed" if not b["changed"] else f"{b['changed']} CHANGED in {b['folders_changed']} place(s)")
+              + (f"; {b['unread']} could not be checked" if b["unread"] else ""))
+        for place in b["places"]:
+            print(f"  {place['state']:<11} {place['path']}  ({place['label']})" + (f": {place['note']}" if place["note"] else ""))
+        if found:
+            print(f"\n{found[0].severity}: {found[0].title}")
+    return 1 if found and found[0].severity in ("high", "critical") else 0
+
+
 def cmd_elevated_scan(a, store: Store) -> int:
     from . import elevate, scan
     print("Requesting administrator rights to read what a normal scan cannot (a UAC prompt will appear)...")
@@ -481,6 +516,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", nargs="?")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_harden)
+
+    p = sub.add_parser("canary", help="ransomware canaries: decoy documents that raise the alarm when something rewrites them")
+    p.add_argument("what", nargs="?", choices=("status", "on", "off", "replace"), default="status",
+                   help="on places them, replace puts a fresh set down, off removes the ones that are unchanged")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_canary)
 
     p = sub.add_parser("elevated-scan", help="scan again with administrator-only sources included (UAC prompt)")
     p.add_argument("--profile", choices=("quick", "full", "deep"), default="quick")

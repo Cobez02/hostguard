@@ -63,8 +63,15 @@ DEFAULTS: dict = {
         "defender_interval_s": 60,
         "persistence_interval_s": 300,
         "files_interval_s": 20,
+        "canary_interval_s": 3,
         "notify": True,
         "watch_dirs": [],
+    },
+    # Where the ransomware canaries go, besides your profile folder and the folders you keep files in.
+    # A change here takes effect the next time the canaries are placed.
+    "canary": {
+        "drive_roots": True,                # one at the top of each fixed drive, where a walk of the drive starts
+        "extra_dirs": [],                   # more folders of yours
     },
     "intel": {"enabled": False},
 }

@@ -2,6 +2,8 @@
 log events as they happen, judges them with the same rules as a scan, and hands what it finds to
 the containment policy.
 
+It also checks the ransomware canaries, when you have placed them, every few seconds.
+
 It runs as you, without administrator rights. That covers programs running in your session, which
 is where nearly all home-PC malware lives. A process that starts and exits between two polls can
 be missed; switching on command-line auditing or Sysmon (dashboard > Hardening) closes that
@@ -16,18 +18,19 @@ import subprocess
 import sys
 import time
 
-from . import defender, notify, paths, policy, reg, sigs, util, winapi
+from . import canary, defender, notify, paths, policy, reg, sigs, util, winapi
 from .collect import eventlogs as c_events
 from .collect import files as c_files
 from .collect import persistence as c_persist
 from .collect import system as c_system
+from .detect import canary as d_canary
 from .detect import eventlogs as d_events
 from .detect import files as d_files
 from .detect import network as d_network
 from .detect import persistence as d_persist
 from .detect import processes as d_proc
 from .detect import system as d_system
-from .model import Finding, SEV_ORDER
+from .model import GONE, OPEN, Finding, SEV_ORDER
 from .store import Store
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -60,7 +63,7 @@ def status() -> dict:
     beat = float(st.get("heartbeat") or 0)
     return {"running": alive and time.time() - beat < 90, "pid": pid if alive else None, "started": st.get("started"),
             "heartbeat_age_s": round(time.time() - beat, 1) if beat else None, "counters": st.get("counters") or {},
-            "autostart": autostart_enabled(), "last_error": st.get("last_error")}
+            "autostart": autostart_enabled(), "last_error": st.get("last_error"), "canary_checked": st.get("canary_checked")}
 
 
 def _command() -> list[str]:
@@ -149,6 +152,14 @@ class Monitor:
         self.started = time.time()
         self.run_id = self.store.start_run("monitor", winapi.is_elevated())
         self.defender_bad = False
+        self.canary_record: dict | None = None      # the last list of canaries read, in case the list itself is destroyed
+        self.canary_open: set[str] = set()          # canary findings this monitor is responsible for closing
+        self.canary_hits = 0
+        self.canary_writers = ""
+        self.canary_checked: float | None = None
+        self.canary_seen: dict = {}                 # decoys read and found intact, so most passes only look at size and time
+        self.canary_read_all = 0.0
+        self.canary_shouted = False
 
     # ------------------------------------------------------------------ plumbing
 
@@ -186,7 +197,8 @@ class Monitor:
 
     def _heartbeat(self) -> None:
         data = {"pid": os.getpid(), "created": winapi.process_created(os.getpid()) if winapi.IS_WINDOWS else None,
-                "started": self.started, "heartbeat": time.time(), "counters": self.counters, "last_error": self.last_error}
+                "started": self.started, "heartbeat": time.time(), "counters": self.counters, "last_error": self.last_error,
+                "canary_checked": self.canary_checked}
         try:
             paths.atomic_write(state_path(), json.dumps(data))
         except OSError:
@@ -218,6 +230,9 @@ class Monitor:
             except util.CollectError:
                 pass
             self.store.kv_set("monitor:autoruns", "primed")
+        record, state = canary.load()
+        self.canary_record = record if state == "ok" else None
+        self.canary_open = {r["id"] for r in self.store.findings((OPEN,)) if r.get("collector") == "canaries" and r.get("kind") == "state"}
 
     @staticmethod
     def _last_record(log_name: str) -> int:
@@ -400,12 +415,83 @@ class Monitor:
                                          key_parts=(f["path"], threat)))
         self._emit(found)
 
+    def _disk_writers(self, seconds: float = 1.0) -> list[dict]:
+        """Which programs are writing most right now: two readings of Windows' own counters, a second apart."""
+        if not winapi.IS_WINDOWS:
+            return []
+        before = {pid: (name, winapi.io_counters(pid)) for pid, _pp, name in winapi.list_pids() if pid > 4 and pid not in self.me}
+        time.sleep(seconds)
+        rows = []
+        for pid, (name, a) in before.items():
+            b = winapi.io_counters(pid) if a else None
+            if not b or b["written_bytes"] < a["written_bytes"]:
+                continue                                    # it has exited, or the number now belongs to another process
+            wrote, writes = b["written_bytes"] - a["written_bytes"], b["writes"] - a["writes"]
+            if wrote > 0 or writes > 0:
+                rows.append({"pid": pid, "name": name, "bytes_per_s": wrote / seconds, "writes_per_s": writes / seconds,
+                             "written_bytes": b["written_bytes"]})
+        rows.sort(key=lambda r: (-r["bytes_per_s"], -r["writes_per_s"]))
+        for r in rows[:8]:
+            p = winapi.describe_process(r["pid"], 0, r["name"], with_token=False)
+            r["path"], r["created"] = p.path or "", p.created
+        return rows[:8]
+
+    def watch_canaries(self) -> None:
+        if time.time() - self.canary_read_all > 30:     # a change that kept a decoy's size and time is found here
+            self.canary_seen.clear()
+            self.canary_read_all = time.time()
+        report = canary.check(self.canary_record, self.canary_seen)
+        if report["record"] == "ok":
+            self.canary_record = report["manifest"]
+        self.canary_checked = time.time()
+        found = d_canary.detect(report)
+        tripped = bool(found) and found[0].rule == "canary.ransomware"
+        if not tripped:
+            self.canary_hits, self.canary_writers = 0, ""
+        if not found:
+            self.canary_shouted = False
+        if tripped and self.canary_writers:
+            found[0].evidence["writing_most_when_noticed"] = self.canary_writers
+        current = {f.key for f in found}
+        news = [f for f in found if not d_canary.dealt_with(self.store, f)]
+        try:
+            self._emit(news)                            # the alarm goes out before anything that takes time
+            for fid in self.canary_open - current:      # what was wrong no longer is: the canaries were replaced or switched off
+                row = self.store.get_finding(fid)
+                if row and row["status"] == OPEN:
+                    self.store.set_status(fid, GONE)
+        except Exception:
+            # HostGuard's database may be among the files being destroyed. The alarm has to sound anyway.
+            if found and SEV_ORDER[found[0].severity] >= SEV_ORDER["high"] and not self.canary_shouted:
+                self.canary_shouted = notify.toast("HostGuard: " + found[0].severity, found[0].title
+                                                   + "\nHostGuard could not record this. Its own files may be affected.")
+            raise
+        self.canary_open = current
+        if not tripped:
+            return
+        s = report["summary"]
+        hits = s["damaged"] + s["missing"] + s["strangers"]
+        if hits <= self.canary_hits:
+            return
+        self.canary_hits = hits                         # first sight of it, or it has spread: see who is writing at this moment
+        rows = self._disk_writers()
+        try:
+            sig_map = sigs.check(self.store, [r["path"] for r in rows if r.get("path")])
+        except Exception:                               # the signature cache lives in the database, which may be among the damage
+            sig_map = {}
+        self.canary_writers, leads = d_canary.writers(rows, sig_map)
+        if self.canary_writers:
+            found[0].evidence["writing_most_when_noticed"] = self.canary_writers
+            self._emit(news)                            # the same finding, now with who was writing
+        self._emit(leads, as_events=True)
+
     # ------------------------------------------------------------------ loop
 
     def step(self) -> None:
         m = self.cfg.get("monitor") or {}
         tasks = (("processes", m.get("process_interval_s", 2), self.watch_processes),
                  ("network", m.get("network_interval_s", 15), self.watch_network),
+                 ("canaries", m.get("canary_interval_s", 3), self.watch_canaries),
                  ("files", m.get("files_interval_s", 20), self.watch_files),
                  ("events", m.get("events_interval_s", 30), self.watch_events),
                  ("defender", m.get("defender_interval_s", 60), self.watch_defender),

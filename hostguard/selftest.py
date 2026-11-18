@@ -1,5 +1,5 @@
-"""Checks that HostGuard itself works on this PC: the rules fire, quarantine round-trips, a process
-can be suspended and resumed, and Defender is awake. Everything it touches is its own temp folder
+"""Checks that HostGuard itself works on this PC: the rules fire, quarantine round-trips, a canary
+notices being overwritten, a process can be suspended and resumed, and Defender is awake. Everything it touches is its own temp folder
 and its own child process.
 
 The optional Defender check writes the EICAR test file, the industry's harmless stand-in for
@@ -15,7 +15,8 @@ import subprocess
 import tempfile
 import time
 
-from . import contain, paths, quarantine, util, winapi
+from . import canary, contain, paths, quarantine, util, winapi
+from .detect import canary as d_canary
 from .detect import cmdline as cl
 from .detect import content
 
@@ -57,6 +58,26 @@ def run(live_defender: bool = False) -> int:
         with open(src, "rb") as f:
             same = f.read() == body
         return bool(back.get("ok")) and same, "a file went into the vault and came back byte for byte"
+
+    def tripwire():
+        # A canary of its own, in the scratch folder. The real ones and the record of them are not touched.
+        import random
+        spot = os.path.join(work, "canary")
+        os.mkdir(spot)
+        placed = canary._place_one({"root": spot, "label": "self-test"}, "!Archive 0000", random.Random(1))
+
+        def named():
+            folders = [canary._check_folder(placed)]
+            found = d_canary.detect({"record": "ok", "placed": None, "folders": folders, "summary": canary._summary(folders)})
+            return found[0].rule if found else None
+        before = named()
+        victim, record = canary._decoys(placed)[-1]         # the decoy beside the folder: the first file a walk meets
+        with open(victim, "r+b") as f:
+            f.write(os.urandom(record["size"]))
+        after = named()
+        can_read_permissions = bool(placed["security"]) or not winapi.IS_WINDOWS
+        return (before is None and after == "canary.ransomware" and can_read_permissions), \
+            "decoy documents were placed in a scratch folder, read back unchanged, and one being overwritten was noticed"
 
     def process():
         child = subprocess.Popen([os.path.join(paths.SYSTEM32, "cmd.exe"), "/q", "/k"], stdin=subprocess.PIPE,
@@ -102,7 +123,7 @@ def run(live_defender: bool = False) -> int:
                 return True, f"Defender removed the test file after {time.time() - started:.1f}s"
         return False, "the EICAR test file was still readable after 15 seconds: real-time protection did not react"
 
-    checks = [("detection rules", rules), ("byte signatures", signatures), ("quarantine vault", vault)]
+    checks = [("detection rules", rules), ("byte signatures", signatures), ("quarantine vault", vault), ("canary tripwire", tripwire)]
     if winapi.IS_WINDOWS:
         checks += [("process containment", process), ("Defender is running", defender_awake)]
         if live_defender:

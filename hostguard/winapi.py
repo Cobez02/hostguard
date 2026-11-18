@@ -1,7 +1,7 @@
 """Thin ctypes wrappers over the Win32 calls HostGuard needs.
 
-Everything here is read-only except suspend_process / resume_process / terminate_process.
-On a non-Windows host the module imports but every call raises NotSupported, so the rule and
+Everything here is read-only except suspend_process / resume_process / terminate_process and
+set_hidden. On a non-Windows host the module imports but every call raises NotSupported, so the rule and
 policy code can still be unit-tested anywhere.
 """
 
@@ -136,6 +136,26 @@ if IS_WINDOWS:
                                            ctypes.c_int, wt.ULONG]
     _iphlp.GetExtendedUdpTable.argtypes = [ctypes.c_void_p, ctypes.POINTER(wt.DWORD), wt.BOOL, wt.ULONG,
                                            ctypes.c_int, wt.ULONG]
+
+    class _IO_COUNTERS(ctypes.Structure):
+        _fields_ = [("reads", ctypes.c_ulonglong), ("writes", ctypes.c_ulonglong), ("others", ctypes.c_ulonglong),
+                    ("read_bytes", ctypes.c_ulonglong), ("written_bytes", ctypes.c_ulonglong),
+                    ("other_bytes", ctypes.c_ulonglong)]
+
+    _k32.GetProcessIoCounters.argtypes = [wt.HANDLE, ctypes.POINTER(_IO_COUNTERS)]
+    _k32.GetFileAttributesW.restype = wt.DWORD
+    _k32.GetFileAttributesW.argtypes = [wt.LPCWSTR]
+    _k32.SetFileAttributesW.argtypes = [wt.LPCWSTR, wt.DWORD]
+    _k32.GetLogicalDrives.restype = wt.DWORD
+    _k32.GetDriveTypeW.restype = wt.UINT
+    _k32.GetDriveTypeW.argtypes = [wt.LPCWSTR]
+    _k32.LocalFree.restype = ctypes.c_void_p
+    _k32.LocalFree.argtypes = [ctypes.c_void_p]
+    _adv.GetNamedSecurityInfoW.restype = wt.DWORD
+    _adv.GetNamedSecurityInfoW.argtypes = [wt.LPCWSTR, ctypes.c_int, wt.DWORD, ctypes.c_void_p, ctypes.c_void_p,
+                                           ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    _adv.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+        ctypes.c_void_p, wt.DWORD, wt.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wt.ULONG)]
 
 
 def _need_windows() -> None:
@@ -557,6 +577,15 @@ def can_replace(path: str) -> bool:
     return bool(file_ok) or bool(folder_ok)
 
 
+def may_read(path: str) -> bool | None:
+    """Does Windows let this process read what is in the file? False when its access list refuses.
+    True when it is allowed, even if another program has the file open just now and shares nothing.
+    None when that cannot be told. Python's own open() reports both refusals as the same error."""
+    if not IS_WINDOWS or not path:
+        return None
+    return _write_handle_ok(path, 0x0001, 0)    # read data
+
+
 def read_zone_identifier(path: str) -> dict | None:
     """Mark-of-the-Web for a file: {zone, host_url, referrer_url}, or None when it has none."""
     try:
@@ -578,6 +607,74 @@ def read_zone_identifier(path: str) -> dict | None:
         elif k == "referrerurl":
             out["referrer_url"] = v.strip()[:500]
     return out or None
+
+
+# ------------------------------------------------------------------ files, folders and disks
+
+# The attribute bits that say who may do what with a file. The rest (archive, compressed, the
+# marks a cloud sync client keeps on a file) change by themselves and say nothing.
+FILE_ATTRIBUTE_READONLY = 0x0001
+FILE_ATTRIBUTE_HIDDEN = 0x0002
+FILE_ATTRIBUTE_SYSTEM = 0x0004
+FILE_ATTRIBUTE_ENCRYPTED = 0x4000     # Windows' own file encryption (EFS) is switched on for it
+
+
+def file_security(path: str) -> str | None:
+    """Who owns a file or folder and who may do what with it, as Windows' SDDL text
+    ("O:<owner>D:<flags>(entry)(entry)..."). None when that cannot be read."""
+    if not IS_WINDOWS:
+        return None
+    sd = ctypes.c_void_p()
+    # a file object; its owner (1) and its access list (4)
+    if _adv.GetNamedSecurityInfoW(path, 1, 1 | 4, None, None, None, None, ctypes.byref(sd)) != 0 or not sd.value:
+        return None
+    try:
+        text = ctypes.c_void_p()
+        if not _adv.ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, 1, 1 | 4, ctypes.byref(text), None) or not text.value:
+            return None
+        try:
+            return ctypes.wstring_at(text.value)
+        finally:
+            _k32.LocalFree(text)
+    finally:
+        _k32.LocalFree(sd)
+
+
+def set_hidden(path: str, hidden: bool = True) -> bool:
+    """Set or clear the Hidden attribute, leaving the others as they are. False when Windows refuses."""
+    if not IS_WINDOWS:
+        return False
+    current = _k32.GetFileAttributesW(path)
+    if current == 0xFFFFFFFF:
+        return False
+    wanted = (current | FILE_ATTRIBUTE_HIDDEN) if hidden else (current & ~FILE_ATTRIBUTE_HIDDEN)
+    return wanted == current or bool(_k32.SetFileAttributesW(path, wanted))
+
+
+def fixed_drives() -> list[str]:
+    """The roots of the drives Windows calls fixed ("C:\\"), in letter order."""
+    if not IS_WINDOWS:
+        return []
+    mask = _k32.GetLogicalDrives()
+    roots = [f"{chr(65 + i)}:\\" for i in range(26) if mask & (1 << i)]
+    return [r for r in roots if _k32.GetDriveTypeW(r) == 3]
+
+
+def io_counters(pid: int) -> dict | None:
+    """How much a process has read and written since it started: operation counts and bytes.
+    None for a process that cannot be opened (most of those running as SYSTEM, without elevation)."""
+    if not IS_WINDOWS:
+        return None
+    h = _k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return None
+    try:
+        c = _IO_COUNTERS()
+        if not _k32.GetProcessIoCounters(h, ctypes.byref(c)):
+            return None
+        return {"writes": c.writes, "written_bytes": c.written_bytes, "reads": c.reads, "read_bytes": c.read_bytes}
+    finally:
+        _k32.CloseHandle(h)
 
 
 def now() -> float:
