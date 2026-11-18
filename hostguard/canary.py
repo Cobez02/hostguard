@@ -275,7 +275,26 @@ def split_security(text: str) -> dict:
     return {"owner": m.group("owner"), "protected": "P" in m.group("flags"), "own": own, "handed_down": handed_down}
 
 
+def _grants(entries: set[str]) -> dict[tuple, str]:
+    """Each entry by what it grants: allow or deny, which rights, to whom, and whether it applies to the item
+    itself or only to what is inside it. How the entry is stored (set on the item, or handed down) is left out."""
+    out = {}
+    for entry in entries:
+        parts = entry.split(";")
+        flags = parts[1] if len(parts) > 1 else ""
+        only_inside = "IO" in [flags[i:i + 2] for i in range(0, len(flags), 2)]
+        out[(parts[0], only_inside, *parts[2:])] = entry
+    return out
+
+
 def _security_changes(was: str | None, now: str | None) -> list[dict]:
+    """What changed about who owns an item and who may do what with it.
+
+    Entries are compared by what they grant, not by how they are stored. After any edit, some tools leave
+    an item with its own copies of the entries it already takes from the folder above. Nothing about who
+    may do what has changed then, and nothing is reported. A grant that appears or disappears is a change:
+    a strong sign when it was made on the item itself, a weak one when it came down from the folder above.
+    """
     if not was or was == now:
         return []
     if not now:
@@ -284,17 +303,27 @@ def _security_changes(was: str | None, now: str | None) -> list[dict]:
     out = []
     if a["owner"] != b["owner"]:
         out.append({"kind": "owner", "text": f"the owner changed from {_who(a['owner'])} to {_who(b['owner'])}"})
-    out += [{"kind": "access", "text": "permission added: " + describe_entry(e)} for e in sorted(b["own"] - a["own"])]
-    out += [{"kind": "access", "text": "permission removed: " + describe_entry(e)} for e in sorted(a["own"] - b["own"])]
-    if a["protected"] != b["protected"]:
-        out.append({"kind": "access", "text": "it no longer takes permissions from the folder above" if b["protected"]
-                    else "it takes permissions from the folder above again"})
-    if a["handed_down"] != b["handed_down"]:
-        added = [describe_entry(e) for e in sorted(b["handed_down"] - a["handed_down"])]
-        gone = [describe_entry(e) for e in sorted(a["handed_down"] - b["handed_down"])]
+    a_own, b_own = _grants(a["own"]), _grants(b["own"])
+    before, after = {**_grants(a["handed_down"]), **a_own}, {**_grants(b["handed_down"]), **b_own}
+    came_down, no_longer = [], []
+    for grant in sorted(set(after) - set(before), key=str):
+        if grant in b_own:
+            out.append({"kind": "access", "text": "permission added: " + describe_entry(after[grant])})
+        else:
+            came_down.append(describe_entry(after[grant]))
+    for grant in sorted(set(before) - set(after), key=str):
+        if grant in a_own or b["protected"]:        # taken off the item itself, or lost when it was cut off from the folder above
+            out.append({"kind": "access", "text": "permission removed: " + describe_entry(before[grant])})
+        else:
+            no_longer.append(describe_entry(before[grant]))
+    if came_down or no_longer:
         out.append({"kind": "inherited", "text": "permissions handed down from the folder above changed"
-                    + (": now also " + ", ".join(added) if added else "") + ("; no longer " + ", ".join(gone) if gone else "")})
-    return out      # empty when the list was only rewritten: the same owner and the same entries are not a change
+                    + (": now also " + ", ".join(came_down) if came_down else "")
+                    + ("; no longer " + ", ".join(no_longer) if no_longer else "")})
+    if a["protected"] != b["protected"]:
+        out.append({"kind": "inherited", "text": "it no longer takes permissions from the folder above" if b["protected"]
+                    else "it takes permissions from the folder above again"})
+    return out
 
 
 def _attribute_changes(was: int, now: int) -> list[dict]:

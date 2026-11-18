@@ -116,10 +116,23 @@ class Permissions(unittest.TestCase):
         self.assertEqual(self.kinds(f"O:{self.ME}D:AI(A;ID;FA;;;BA)(A;ID;FA;;;{self.ME})(A;ID;FA;;;SY)"), [], "nor is their order")
         self.assertEqual(self.kinds(self.BASE + "(A;;FA;;;WD)"), [("access", "permission added: allow Everyone full control")])
         self.assertEqual(self.kinds(self.BASE.replace(f"O:{self.ME}", "O:BA")), [("owner", f"the owner changed from {self.ME} to Administrators")])
+        # What GitHub's Windows machines do after any edit with icacls: the item keeps what it takes from the
+        # folder above and also gets its own copy of each of those entries. Who may do what is the same.
+        copies = f"(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{self.ME})"
+        self.assertEqual(self.kinds(self.BASE.replace("D:AI", "D:AI" + copies)), [], "its own copy of what it already had is not a change")
+        self.assertEqual(self.kinds(f"O:{self.ME}D:PAI{copies}"),
+                         [("inherited", "it no longer takes permissions from the folder above")], "cut off, with nothing gained or lost")
         cut_off = f"O:{self.ME}D:PAI(A;;FA;;;SY)(A;;FA;;;{self.ME})"
-        got = self.kinds(cut_off)
-        self.assertIn(("access", "it no longer takes permissions from the folder above"), got)
-        self.assertTrue(all(kind in ("access", "inherited") for kind, _ in got), got)
+        self.assertEqual(self.kinds(cut_off), [("access", "permission removed: allow Administrators full control"),
+                                               ("inherited", "it no longer takes permissions from the folder above")])
+        self.assertEqual(self.kinds(self.BASE.replace("(A;ID;FA;;;BA)", "")),
+                         [("inherited", "permissions handed down from the folder above changed; no longer allow Administrators full control")])
+        had_own = self.BASE + "(A;;FR;;;BU)"
+        self.assertEqual([(c["kind"], c["text"]) for c in canary._security_changes(had_own, self.BASE)],
+                         [("access", "permission removed: allow Users read")])
+        self.assertEqual(self.kinds(self.BASE + "(D;;FW;;;WD)(A;OICIIO;FA;;;SY)"),
+                         [("access", "permission added: allow SYSTEM full control"), ("access", "permission added: deny Everyone write")],
+                         "a deny is a change, and so is an entry that only applies to what is inside")
         handed = self.kinds(self.BASE + "(A;ID;0x1200a9;;;BG)")
         self.assertEqual(handed, [("inherited", "permissions handed down from the folder above changed: now also allow Guests read and run")])
         self.assertEqual(self.kinds(None), [("unread", "its owner and permissions could not be read")])
@@ -480,6 +493,10 @@ class Changes(Placed):
         self.assertEqual(f.evidence["untouched"], "14 of 15")
         icacls(target, "/remove", EVERYONE)
         self.assertIsNone(self.look()[1], "back to who may do what: nothing to report")
+        icacls(target, "/grant", "*S-1-5-18:F")                                   # SYSTEM, which the folder above already lets in
+        self.assertTrue(canary.split_security(winapi.file_security(target))["own"])
+        self.assertIsNone(self.look()[1], "its own copy of a permission it already had changes nothing")
+        icacls(target, "/remove:g", "*S-1-5-18")
         icacls(self.roots[1], "/grant", GUESTS + ":(OI)(CI)R")                    # the owner shares the folder above
         f = self.look()[1]
         self.assertEqual((f.rule, f.severity, f.confidence), ("canary.settings", "low", "low"))
@@ -940,7 +957,10 @@ class WindowsFiles(unittest.TestCase):
         self.assertTrue(parts["owner"] and parts["handed_down"] and not parts["own"] and not parts["protected"], "a new file takes everything from its folder")
         icacls(target, "/grant", EVERYONE + ":R")
         after = canary.split_security(winapi.file_security(target))
-        self.assertEqual((len(after["own"]), after["handed_down"], after["owner"]), (1, parts["handed_down"], parts["owner"]))
+        self.assertEqual((after["handed_down"], after["owner"]), (parts["handed_down"], parts["owner"]))
+        self.assertTrue(any(entry.endswith(";;;WD") for entry in after["own"]), after["own"])
+        self.assertEqual([c["text"] for c in canary._security_changes(before, winapi.file_security(target))],
+                         ["permission added: allow Everyone read"], "whatever else the tool rewrote on this version of Windows")
         self.assertIsNone(winapi.file_security(os.path.join(folder, "not there")))
         self.assertTrue(winapi.set_hidden(folder))
         self.assertTrue(os.stat(folder).st_file_attributes & winapi.FILE_ATTRIBUTE_HIDDEN)
