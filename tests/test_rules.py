@@ -612,6 +612,25 @@ class Network(unittest.TestCase):
         self.assertEqual(one(fs, "net.intel_match").severity, "critical")
         self.assertNotIn(13, [f.entity.get("pid") for f in fs])
 
+    def test_lsass_checking_certificates_is_not_an_alarm(self):
+        real, fake, pad = S32 + r"\lsass.exe", TEMP + r"\lsass.exe", S32 + r"\notepad.exe"
+        ocsp, crl = "143.204.160.106", "143.204.162.24"         # where one certificate authority answers "was this revoked?"
+
+        def alarms(procs, conns):
+            fs = d_network.detect({"processes": procs, "connections": conns}, sigs_for(**{real: MS, fake: UNSIGNED, pad: MS}), {})
+            return [f for f in fs if f.rule == "net.lolbin_online"]
+        # Without administrator rights lsass.exe cannot be opened, so its path is not known. With them, it is.
+        self.assertEqual(alarms([proc(700, "lsass.exe")], [conn(700, ocsp, 80), conn(700, crl, 80)]), [])
+        self.assertEqual(alarms([proc(700, "lsass.exe", real)], [conn(700, ocsp, 80)]), [])
+        f = one(alarms([proc(700, "lsass.exe")], [conn(700, ocsp, 80), conn(700, "198.51.103.5", 4444), conn(700, "198.51.103.6", 443)]),
+                "net.lolbin_online")
+        self.assertEqual((f.severity, f.entity["pid"], f.evidence["remote"]), ("high", 700, ["198.51.103.5:4444", "198.51.103.6:443"]))
+        self.assertIn("certificate checks on port 80 are not counted", f.description)
+        self.assertEqual(len(alarms([proc(701, "lsass.exe", fake)], [conn(701, ocsp, 80)])), 1, "a program that only carries the name")
+        f = one(alarms([proc(702, "notepad.exe", pad)], [conn(702, ocsp, 80)]), "net.lolbin_online")
+        self.assertEqual(f.evidence["remote"], [ocsp + ":80"])
+        self.assertNotIn("not counted", f.description, "nothing else is excused on port 80")
+
     def test_listeners(self):
         nc, sshd = r"C:\Users\a\Downloads\nc.exe", r"C:\Windows\System32\OpenSSH\sshd.exe"
         procs = [proc(10, "nc.exe", nc), proc(11, "sshd.exe", sshd), proc(12, "python.exe", r"C:\Python\python.exe")]

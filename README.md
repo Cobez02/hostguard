@@ -277,7 +277,7 @@ quarantined files into AppData through Windows' transfer service so they land in
 python -m unittest discover -s tests
 ```
 
-278 tests. They cover the rules (what must fire and what must not), they exercise containment
+279 tests. They cover the rules (what must fire and what must not), they exercise containment
 for real on throwaway processes, files and registry values that the tests create themselves,
 they place canaries in throwaway folders and overwrite, rename, delete, lock and re-permission them,
 they send the dashboard the requests a hostile web page could forge and check each is refused,

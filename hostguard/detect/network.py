@@ -14,6 +14,11 @@ NEVER_ONLINE = {"notepad.exe", "calc.exe", "mspaint.exe", "write.exe", "wordpad.
                 "mshta.exe", "wscript.exe", "cscript.exe", "certutil.exe", "installutil.exe", "regasm.exe", "regsvcs.exe",
                 "cmstp.exe", "msxsl.exe", "odbcconf.exe", "esentutl.exe", "cmd.exe", "conhost.exe", "dllhost.exe",
                 "werfault.exe", "userinit.exe", "winlogon.exe", "lsass.exe", "csrss.exe", "smss.exe", "wininit.exe"}
+# What one of them does reach out for by itself, by remote port. lsass.exe asks certificate authorities
+# whether a certificate has been revoked, and that is plain HTTP to whatever network the authority's
+# servers sit on. Only the real one is excused: a program that merely carries the name, running from
+# somewhere else, is not.
+EXPECTED_PORTS = {"lsass.exe": {80: "certificate checks"}}
 SHELL_LISTENERS = {"cmd.exe", "powershell.exe", "pwsh.exe", "nc.exe", "ncat.exe", "nc64.exe", "socat.exe", "netcat.exe"}
 ODD_PORTS = {4444: "the default port of Metasploit and many backdoors", 4445: "a common backdoor port",
              1337: "a common backdoor port", 31337: "a common backdoor port", 6667: "IRC, used by older botnets",
@@ -75,12 +80,18 @@ def detect(facts: dict, sig_map: dict[str, dict], ctx: dict | None = None) -> li
                                evidence={**ev, "listed": bad}, entity=ent, mitre=["T1071"], actions=["suspend", "kill", "block_ip", "isolate"],
                                key_parts=(key, bad[0])))
         if name in NEVER_ONLINE:
-            out.append(Finding(rule="net.lolbin_online", title=f"{p.get('name')} has a connection to the internet",
-                               severity="high", confidence="medium", category="network", collector="network",
-                               description="This Windows component does not make internet connections on its own. Either "
-                                           "it was launched to download something, or other code is running inside it.",
-                               evidence=ev, entity=ent, mitre=["T1218", "T1055", "T1071"], actions=["suspend", "kill", "block_ip"],
-                               key_parts=(key,)))
+            genuine = not p.get("path") or util.path_zone(p["path"]) == "windows"
+            expected = EXPECTED_PORTS.get(name, {}) if genuine else {}
+            unexpected = [f"{ip}:{port}" for ip, port in remotes if port not in expected]
+            if unexpected:
+                excused = "".join(f" Its {what} on port {port} are not counted here." for port, what in expected.items())
+                out.append(Finding(rule="net.lolbin_online", title=f"{p.get('name')} has a connection to the internet",
+                                   severity="high", confidence="medium", category="network", collector="network",
+                                   description="This Windows component does not make internet connections like this on its "
+                                               "own. Either it was launched to download something, or other code is running "
+                                               "inside it." + excused,
+                                   evidence={**ev, "remote": unexpected[:12]}, entity=ent, mitre=["T1218", "T1055", "T1071"],
+                                   actions=["suspend", "kill", "block_ip"], key_parts=(key,)))
         elif name in ("powershell.exe", "pwsh.exe"):
             hits = cl.analyse_command(p.get("cmdline") or "")
             out.append(Finding(rule="net.powershell_online", title="PowerShell has a connection to the internet",
