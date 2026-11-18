@@ -631,6 +631,36 @@ class Network(unittest.TestCase):
         self.assertEqual(f.evidence["remote"], [ocsp + ":80"])
         self.assertNotIn("not counted", f.description, "nothing else is excused on port 80")
 
+    def test_block_address_is_offered_only_when_there_is_one_address_to_block(self):
+        run, tool = S32 + r"\rundll32.exe", TEMP + r"\upd.exe"
+
+        def findings(procs, conns, ctx=None):
+            return {f.rule: f for f in d_network.detect({"processes": procs, "connections": conns}, sigs_for(**{run: MS, tool: UNSIGNED}), ctx or {})}
+        # One address, even on two ports: the finding is about the process and about that address.
+        f = findings([proc(10, "rundll32.exe", run)], [conn(10, "198.51.103.5", 443), conn(10, "198.51.103.5", 8443)])["net.lolbin_online"]
+        self.assertEqual((f.entity["type"], f.entity["pid"], f.entity["ip"], f.actions), ("process", 10, "198.51.103.5", ["suspend", "kill", "block_ip"]))
+        # Several: blocking one would leave the rest reachable, so the process is the thing to stop.
+        f = findings([proc(10, "rundll32.exe", run)], [conn(10, "198.51.103.5", 443), conn(10, "198.51.103.6", 443)])["net.lolbin_online"]
+        self.assertEqual(("ip" in f.entity, f.entity["pid"], f.actions), (False, 10, ["suspend", "kill"]))
+        fs = findings([proc(12, "upd.exe", tool)], [conn(12, "198.51.103.7", 4444), conn(12, "198.51.103.8", 443), conn(12, "198.51.103.99", 443)],
+                      {"bad_ips": {"198.51.103.99"}})
+        self.assertEqual(("ip" in fs["net.unsigned_online"].entity, fs["net.unsigned_online"].actions), (False, ["suspend", "kill"]))
+        # A finding that names one address in its title is about that address, whatever else the program talks to.
+        self.assertEqual((fs["net.odd_port"].entity["ip"], fs["net.odd_port"].actions), ("198.51.103.7", ["suspend", "kill", "block_ip"]))
+        self.assertEqual((fs["net.intel_match"].entity["ip"], fs["net.intel_match"].actions),
+                         ("198.51.103.99", ["suspend", "kill", "block_ip", "isolate"]))
+        # For lsass.exe only the address that is not a certificate check counts.
+        f = findings([proc(700, "lsass.exe")], [conn(700, "143.204.160.106", 80), conn(700, "198.51.103.5", 8443)])["net.lolbin_online"]
+        self.assertEqual(f.entity["ip"], "198.51.103.5")
+        # The address a finding carries is one the containment code takes. A dry run: nothing is blocked.
+        from hostguard import contain
+        for f in (fs["net.odd_port"], fs["net.intel_match"]):
+            res = contain.execute(None, "block_ip", f.entity, dry_run=True)
+            self.assertEqual((res["ok"], res["target"]), (True, {"type": "ip", "ip": f.entity["ip"]}))
+        res = contain.execute(None, "block_ip", fs["net.unsigned_online"].entity, dry_run=True)
+        self.assertEqual((res["ok"], res.get("refused")), (False, True))
+        self.assertIn("no address given", res["message"])
+
     def test_listeners(self):
         nc, sshd = r"C:\Users\a\Downloads\nc.exe", r"C:\Windows\System32\OpenSSH\sshd.exe"
         procs = [proc(10, "nc.exe", nc), proc(11, "sshd.exe", sshd), proc(12, "python.exe", r"C:\Python\python.exe")]

@@ -31,6 +31,19 @@ ADMIN_LISTEN = {3389: "Remote Desktop", 5900: "VNC", 5901: "VNC", 22: "SSH", 23:
                 2222: "SSH on an alternate port", 3390: "Remote Desktop on an alternate port"}
 
 
+def _subject(process: dict, addresses: list[str], offered: list[str]) -> tuple[dict, list[str]]:
+    """What containment would act on, and which of the offered actions fit.
+
+    That is always the process. It is the address as well when the finding is about exactly one: then
+    "block address" has an address to block. With several, blocking one would look like containment and
+    leave the rest reachable, so that action is not offered and the process is the thing to stop.
+    """
+    unique = sorted(set(addresses))
+    if len(unique) == 1:
+        return {**process, "ip": unique[0]}, list(offered)
+    return dict(process), [a for a in offered if a != "block_ip"]
+
+
 def detect(facts: dict, sig_map: dict[str, dict], ctx: dict | None = None) -> list[Finding]:
     ctx = ctx or {}
     intel = ctx.get("bad_ips") or set()
@@ -74,24 +87,26 @@ def detect(facts: dict, sig_map: dict[str, dict], ctx: dict | None = None) -> li
         ent = {"type": "process", "pid": p.get("pid"), "name": p.get("name"), "path": p.get("path") or "", "created": p.get("created")}
         bad = [ip for ip, _ in remotes if ip in intel]
         if bad:
+            subject, actions = _subject(ent, bad[:1], ["suspend", "kill", "block_ip", "isolate"])
             out.append(Finding(rule="net.intel_match", title=f"{p.get('name')} is connected to a known malicious address: {bad[0]}",
                                severity="critical", confidence="high", category="network", collector="network",
                                description="The address is on a threat-intelligence blocklist of command-and-control servers.",
-                               evidence={**ev, "listed": bad}, entity=ent, mitre=["T1071"], actions=["suspend", "kill", "block_ip", "isolate"],
+                               evidence={**ev, "listed": bad}, entity=subject, mitre=["T1071"], actions=actions,
                                key_parts=(key, bad[0])))
         if name in NEVER_ONLINE:
             genuine = not p.get("path") or util.path_zone(p["path"]) == "windows"
             expected = EXPECTED_PORTS.get(name, {}) if genuine else {}
-            unexpected = [f"{ip}:{port}" for ip, port in remotes if port not in expected]
+            unexpected = [(ip, port) for ip, port in remotes if port not in expected]
             if unexpected:
                 excused = "".join(f" Its {what} on port {port} are not counted here." for port, what in expected.items())
+                subject, actions = _subject(ent, [ip for ip, _ in unexpected], ["suspend", "kill", "block_ip"])
                 out.append(Finding(rule="net.lolbin_online", title=f"{p.get('name')} has a connection to the internet",
                                    severity="high", confidence="medium", category="network", collector="network",
                                    description="This Windows component does not make internet connections like this on its "
                                                "own. Either it was launched to download something, or other code is running "
                                                "inside it." + excused,
-                                   evidence={**ev, "remote": unexpected[:12]}, entity=ent, mitre=["T1218", "T1055", "T1071"],
-                                   actions=["suspend", "kill", "block_ip"], key_parts=(key,)))
+                                   evidence={**ev, "remote": [f"{ip}:{port}" for ip, port in unexpected[:12]]}, entity=subject,
+                                   mitre=["T1218", "T1055", "T1071"], actions=actions, key_parts=(key,)))
         elif name in ("powershell.exe", "pwsh.exe"):
             hits = cl.analyse_command(p.get("cmdline") or "")
             out.append(Finding(rule="net.powershell_online", title="PowerShell has a connection to the internet",
@@ -101,18 +116,20 @@ def detect(facts: dict, sig_map: dict[str, dict], ctx: dict | None = None) -> li
                                evidence=ev, entity=ent, mitre=["T1059.001", "T1071.001"], actions=["suspend", "kill"], key_parts=(key,)))
         elif p.get("path") and sigs.lacks_trust(sig) and util.path_zone(p["path"]) in util.USER_WRITABLE:
             zone = util.path_zone(p["path"])
+            subject, actions = _subject(ent, [ip for ip, _ in remotes], ["suspend", "kill", "block_ip"])
             out.append(Finding(rule="net.unsigned_online", title=f"Unsigned program from a user-writable folder is talking to the internet: {p.get('name')}",
                                severity="medium" if zone in util.HIGH_RISK else "low", confidence="low", category="network",
                                collector="network", description="Nobody signed this program and it has an open connection to "
                                                                 "a public address. Developer tools fit this description; so do implants.",
-                               evidence=ev, entity=ent, mitre=["T1071"], actions=["suspend", "kill", "block_ip"], key_parts=(key,)))
+                               evidence=ev, entity=subject, mitre=["T1071"], actions=actions, key_parts=(key,)))
         odd = [(ip, port) for ip, port in remotes if port in ODD_PORTS]
         if odd and not sigs.is_valid(sig):
             ip, port = odd[0]
+            subject, actions = _subject(ent, [ip], ["suspend", "kill", "block_ip"])
             out.append(Finding(rule="net.odd_port", title=f"{p.get('name')} is connected to {ip} on port {port}",
                                severity="medium", confidence="low", category="network", collector="network",
                                description=f"Port {port} is {ODD_PORTS[port]}, and the program is not signed by a known publisher.",
-                               evidence=ev, entity=ent, mitre=["T1571"], actions=["suspend", "kill", "block_ip"], key_parts=(key, port)))
+                               evidence=ev, entity=subject, mitre=["T1571"], actions=actions, key_parts=(key, port)))
 
     # ---- listeners
     exposed = []

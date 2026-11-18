@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -20,6 +21,7 @@ _TMP = tempfile.mkdtemp(prefix="hg-test-")
 os.environ["HOSTGUARD_HOME"] = os.path.join(_TMP, "state")
 
 from hostguard import contain, paths, policy, quarantine, reg, util, winapi  # noqa: E402
+from hostguard.detect import network as d_network  # noqa: E402
 from hostguard.model import Finding  # noqa: E402
 from hostguard.store import Store  # noqa: E402
 
@@ -416,6 +418,36 @@ class AutorunAndNetwork(unittest.TestCase):
         self.assertIn("private address", contain.execute(self.store, "block_ip", {"ip": "192.168.1.1"})["message"])
         ok = contain.execute(self.store, "block_ip", {"ip": "8.8.8.8"}, dry_run=True)   # dry run: nothing is blocked
         self.assertTrue(ok["ok"] and ok["dry_run"])
+        about_a_process = {"type": "process", "pid": 4242, "name": "upd.exe", "path": "", "ip": "8.8.4.4"}      # a network finding's subject
+        self.assertEqual(contain.execute(self.store, "block_ip", about_a_process, dry_run=True)["target"], {"type": "ip", "ip": "8.8.4.4"})
+        self.assertIn("no address given", contain.execute(self.store, "block_ip", {"type": "process", "pid": 4242})["message"])
+
+    def test_block_address_on_a_network_finding_blocks_its_address_and_can_be_undone(self):
+        """The administrator helper and the firewall are stand-ins here. Nothing on this PC is blocked."""
+        tool = r"C:\Users\Public\upd.exe"
+        facts = {"processes": [{"pid": 4242, "ppid": 0, "name": "upd.exe", "path": tool, "cmdline": "", "created": time.time() - 60}],
+                 "connections": [{"proto": "tcp", "state": "ESTABLISHED", "laddr": "192.168.1.10", "lport": 50000,
+                                  "raddr": "198.51.103.7", "rport": 443, "pid": 4242}]}
+        unsigned = {tool.lower(): {"status": "NotSigned", "signer": "", "issuer": "", "is_os": False}}
+        finding = next(f for f in d_network.detect(facts, unsigned, {}) if f.rule == "net.unsigned_online")
+        self.store.upsert_findings(self.store.start_run("test", False), [finding.to_row()])
+        row = self.store.get_finding(finding.key)
+        self.assertIn("block_ip", row["actions"])
+        firewall, asked = set(), []
+
+        def helper(verb, args, actor):
+            asked.append((verb, args["ip"]))
+            rule = f"HostGuard-Block-{args['ip']}-Out"
+            firewall.add(rule) if verb == "block-ip" else firewall.discard(rule)
+            return {"ok": True, "message": "done"}
+        with mock.patch.object(contain, "_elevated", helper), mock.patch.object(contain, "_rule_exists", lambda name: name in firewall):
+            res = contain.execute(self.store, "block_ip", row["entity"], actor="operator", finding_id=row["id"])
+            self.assertTrue(res["ok"] and res["verified"] and res["undoable"], res)
+            self.assertEqual((res["target"], asked), ({"type": "ip", "ip": "198.51.103.7"}, [("block-ip", "198.51.103.7")]))
+            self.assertEqual(self.store.get_finding(row["id"])["status"], "contained")
+            self.assertTrue(contain.undo(self.store, res["action_id"])["ok"])
+            self.assertEqual((asked[-1], firewall), (("unblock-ip", "198.51.103.7"), set()))
+        self.assertEqual(self.store.get_finding(row["id"])["status"], "open")
 
     def test_automatic_actions_never_ask_for_elevation(self):
         res = contain.execute(self.store, "block_ip", {"ip": "8.8.8.8"}, actor="auto-policy")

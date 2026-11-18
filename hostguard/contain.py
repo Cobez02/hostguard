@@ -135,6 +135,8 @@ def file_target(entity: dict, actor: str, force: bool) -> dict:
 
 def ip_target(entity: dict, force: bool) -> dict:
     raw = str(entity.get("ip") or "").strip()
+    if not raw:
+        raise Refused("no address given. A finding that involves several addresses has no single one to block")
     try:
         ip = ipaddress.ip_address(raw)
     except ValueError:
