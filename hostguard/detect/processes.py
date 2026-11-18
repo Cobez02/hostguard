@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import unicodedata
 
 from .. import paths, sigs, util
@@ -70,6 +71,34 @@ def _proc_evidence(p: dict, parent: dict | None, sig: dict | None) -> dict:
         if parent.get("path"):
             ev["parent_path"] = parent["path"]
     return {k: v for k, v in ev.items() if v not in (None, "")}
+
+
+_ARG = re.compile(r'(?:[^\s"]+|"[^"]*")+')
+
+
+def browser_switches(cmdline: str, any_prefix: bool = False) -> dict[str, str]:
+    """The switches on a browser's command line, read the way a Chromium browser reads them.
+
+    A switch is an argument that starts with two dashes; its name is not case-sensitive; and a
+    bare -- ends the switches, so everything after it is an address to open. Looking for a
+    switch's name anywhere in the line instead would let an address that merely contains the
+    name pass for the switch.
+
+    On Windows these browsers also take a switch written with one dash or with a slash (checked
+    against Edge: the debugging port opens either way). any_prefix reads those spellings too. It
+    is for the switch whose presence is the warning sign, so that no spelling slips past. A
+    switch that excuses a process is only taken the way the browser itself writes it.
+    """
+    out: dict[str, str] = {}
+    prefixes = ("--", "-", "/") if any_prefix else ("--",)
+    for arg in (a.replace('"', "") for a in _ARG.findall(cmdline or "")[1:]):
+        if arg == "--":
+            break
+        prefix = next((x for x in prefixes if arg.startswith(x) and len(arg) > len(x)), None)
+        if prefix:
+            name, _, value = arg[len(prefix):].partition("=")
+            out[name.lower()] = value
+    return out
 
 
 def double_extension(name: str) -> bool:
@@ -266,10 +295,15 @@ def detect(facts: dict, sig_map: dict[str, dict], ctx: dict | None = None) -> li
             add(p, par, sig, "proc.remote_access_tool", f"Remote access software is running: {product}", sev, "low",
                 desc, ("T1219",), key_extra=(product,), actions=("suspend", "kill"),
                 remediation="Confirm you installed it and check who is allowed to connect. Uninstall it otherwise.")
-        if name in BROWSERS and cmd and "--remote-debugging-port" in cmd.lower() and "--headless" not in cmd.lower():
-            add(p, par, sig, "proc.browser.remote_debugging", f"{p['name']} is running with remote debugging open",
-                "medium", "low",
-                "Anything on this PC can drive a browser started this way and read its cookies and saved "
-                "sessions. Test automation does it on purpose; so do infostealers.", ("T1185", "T1539"),
-                actions=("kill",))
+        if name in BROWSERS and cmd and "remote-debugging-port" in browser_switches(cmd, any_prefix=True):
+            switches = browser_switches(cmd)
+            # Only the browser itself opens the port. Its renderer, GPU and utility processes are handed
+            # the same switch and open nothing, so they are not what to report or to stop. A headless
+            # browser is test automation; its helpers do not carry --headless, only their --type.
+            if "headless" not in switches and not switches.get("type"):
+                add(p, par, sig, "proc.browser.remote_debugging", f"{p['name']} is running with remote debugging open",
+                    "medium", "low",
+                    "Anything on this PC can drive a browser started this way and read its cookies and saved "
+                    "sessions. Test automation does it on purpose; so do infostealers.", ("T1185", "T1539"),
+                    actions=("kill",))
     return out

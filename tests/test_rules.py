@@ -131,6 +131,52 @@ class Processes(unittest.TestCase):
         sev = {f.entity["pid"]: f.severity for f in fs if f.rule == "proc.remote_access_tool"}
         self.assertEqual(sev, {10: "medium", 11: "critical", 12: "low"})
 
+    def test_remote_debugging_is_reported_on_the_browser_and_never_on_its_helpers(self):
+        edge, chrome = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        note = S32 + r"\notepad.exe"
+        e, c = f'"{edge}"', f'"{chrome}"'
+        procs = [
+            proc(10, "msedge.exe", edge, e + r" --remote-debugging-port=9222 --user-data-dir=C:\p"),
+            proc(11, "msedge.exe", edge, e + " --type=renderer --remote-debugging-port=9222 --lang=en-US", ppid=10),
+            proc(12, "msedge.exe", edge, e + " --type=gpu-process --remote-debugging-port=9222", ppid=10),
+            proc(13, "msedge.exe", edge, e + " --type=utility --utility-sub-type=network.mojom.NetworkService --remote-debugging-port=9222", ppid=10),
+            proc(14, "msedge.exe", edge, edge + " --type=crashpad-handler --remote-debugging-port=9222", ppid=10),   # path not quoted
+            proc(20, "chrome.exe", chrome, c + " --headless=new --remote-debugging-port=9377"),                      # test automation
+            proc(21, "chrome.exe", chrome, c + " --type=renderer --remote-debugging-port=9377", ppid=20),            # its helper has no --headless
+            proc(30, "chrome.exe", chrome, c + " --profile-directory=Default"),
+            proc(31, "notepad.exe", note, "notepad.exe --remote-debugging-port=9222"),
+        ]
+        fs = self.run_rules(procs, sigs_for(**{edge: VENDOR, chrome: VENDOR, note: MS}))
+        f = one(fs, "proc.browser.remote_debugging")
+        self.assertEqual((f.entity["pid"], f.severity, f.actions), (10, "medium", ["kill"]))
+        self.assertEqual({x.entity["pid"] for x in fs}, {10}, rules(fs))
+
+    def test_a_browser_switch_counts_only_where_the_browser_reads_one(self):
+        chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        cases = [
+            ("--remote-debugging-port=9222", True),
+            ("--Remote-Debugging-Port=9222", True),                                   # names are not case-sensitive
+            ('"--remote-debugging-port=9222"', True),
+            ("-remote-debugging-port=9222", True),                                    # Edge opens the port for these spellings too
+            ("/remote-debugging-port=9222", True),
+            ("--remote-debugging-port=9222 -- --type=renderer", True),                # after a bare -- nothing is a switch
+            ("--remote-debugging-port=9222 -- --headless", True),
+            ("--remote-debugging-port=9222 https://example.com/?q=--headless", True),
+            ("--remote-debugging-port=9222 --type=", True),                           # a helper always says which kind it is
+            ("--remote-debugging-port=9222 -type=renderer", True),                    # an excuse is only taken as the browser writes it
+            ("--remote-debugging-port=9222 /headless", True),
+            ("--headless --remote-debugging-port=9222", False),
+            ("--remote-debugging-port=9222 --HEADLESS=new", False),
+            ("-- --remote-debugging-port=9222", False),                               # an address to open, not a switch
+            ("https://example.com/--remote-debugging-port=9222", False),
+            ("--user-data-dir=C:\\--remote-debugging-port=9222", False),
+        ]
+        for i, (args, fires) in enumerate(cases):
+            fs = self.run_rules([proc(40 + i, "chrome.exe", chrome, f'"{chrome}" {args}')], sigs_for(**{chrome: VENDOR}))
+            self.assertEqual("proc.browser.remote_debugging" in rules(fs), fires, args)
+        self.assertEqual(d_proc.browser_switches(f'"{chrome}" --a=1 --B --c="x y" -d /e -- --f'), {"a": "1", "b": "", "c": "x y"})
+        self.assertEqual(sorted(d_proc.browser_switches(f'"{chrome}" --a -d /e=2 -- /g', any_prefix=True)), ["a", "d", "e"])
+
     def test_hostguard_skips_itself(self):
         t = TEMP + r"\tool.exe"
         self.assertEqual(self.run_rules([proc(10, "tool.exe", t)], sigs_for(**{t: UNSIGNED}), self_pids=[10]), [])
